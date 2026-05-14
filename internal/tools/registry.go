@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -166,6 +167,37 @@ func (r *Registry) List() []string {
 	return names
 }
 
+// toolNamesSorted is List() with a deterministic order, used to embed
+// the valid tool set in error messages so the LLM can self-correct.
+func (r *Registry) toolNamesSorted() []string {
+	names := r.List()
+	sort.Strings(names)
+	return names
+}
+
+// requiredParamNames returns the names of a tool's required parameters
+// in their declared order.
+func requiredParamNames(t *Tool) []string {
+	names := make([]string, 0, len(t.Parameters))
+	for _, p := range t.Parameters {
+		if p.Required {
+			names = append(names, p.Name)
+		}
+	}
+	return names
+}
+
+// providedKeys returns the keys of an args map in sorted order, used to
+// surface "what did the LLM actually pass?" in error messages.
+func providedKeys(args map[string]string) []string {
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // Execute runs a tool by name with the given arguments.
 // Note: the caller's args map is never mutated — Execute works on a copy.
 func (r *Registry) Execute(name string, args map[string]string) (Result, error) {
@@ -180,7 +212,10 @@ func (r *Registry) Execute(name string, args map[string]string) (Result, error) 
 
 	tool, ok := r.Get(name)
 	if !ok {
-		return Result{}, fmt.Errorf("unknown tool: %s", name)
+		return Result{}, fmt.Errorf(
+			"unknown tool: %s. Valid tools: %s",
+			name, strings.Join(r.toolNamesSorted(), ", "),
+		)
 	}
 
 	// Defensive copy — agents/loggers may retain a reference to the original
@@ -207,7 +242,16 @@ func (r *Registry) Execute(name string, args map[string]string) (Result, error) 
 	for _, p := range tool.Parameters {
 		if p.Required {
 			if v, exists := localArgs[p.Name]; !exists || strings.TrimSpace(v) == "" {
-				return Result{}, fmt.Errorf("missing required parameter '%s' for tool '%s'", p.Name, name)
+				required := requiredParamNames(tool)
+				provided := providedKeys(localArgs)
+				providedStr := strings.Join(provided, ", ")
+				if providedStr == "" {
+					providedStr = "(none)"
+				}
+				return Result{}, fmt.Errorf(
+					"missing required parameter '%s' for tool '%s'. Required params: %s; you provided: %s. Use <parameter=%s>…</parameter>.",
+					p.Name, name, strings.Join(required, ", "), providedStr, p.Name,
+				)
 			}
 		}
 	}

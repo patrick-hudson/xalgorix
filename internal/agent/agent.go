@@ -773,6 +773,16 @@ func formatToolResult(toolName string, result tools.Result) string {
 func getToolSuggestion(toolName, errorMsg string) string {
 	lower := strings.ToLower(errorMsg)
 
+	// Error-class branches first — these match the message itself rather
+	// than the tool name, because the LLM-side fixes are the same
+	// regardless of which (mis-named) tool the call targeted.
+	if strings.Contains(lower, "unknown tool") {
+		return "Suggestion: That tool name isn't registered. Pick one from the 'Valid tools' list in the error. Tool calls must use <function=TOOL_NAME>…</function> — do not put a tool call inside another <parameter> body, and do not copy the literal word 'value' from the format example.\n"
+	}
+	if strings.Contains(lower, "missing required parameter") {
+		return "Suggestion: You omitted a required parameter, or used the wrong key name. Use <parameter=KEY>VALUE</parameter> (with '=', not <parameter name=\"KEY\">). The error lists the exact required params for this tool.\n"
+	}
+
 	switch {
 	case strings.Contains(toolName, "terminal") || strings.Contains(toolName, "browser"):
 		if strings.Contains(lower, "not found") || strings.Contains(lower, "no such file") {
