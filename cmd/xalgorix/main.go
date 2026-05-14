@@ -637,6 +637,19 @@ func autoUpdateCheckPath() string {
 	return filepath.Join(dir, "last_update_check")
 }
 
+// autoUpdateDisabled returns true when XALGORIX_DISABLE_AUTO_UPDATE is
+// set to a truthy value. Required for fork deployments — the upstream
+// GitHub URL is hardcoded in fetchLatestRelease/fetchLatestTag, so
+// without this gate a fork's binary self-overwrites with upstream on
+// every restart.
+func autoUpdateDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("XALGORIX_DISABLE_AUTO_UPDATE"))) {
+	case "1", "true", "yes", "on", "y", "t":
+		return true
+	}
+	return false
+}
+
 // autoUpdateThrottled returns true when the last update check happened
 // within autoUpdateInterval. Failures to read/write the marker are
 // non-fatal — the worst case is one extra GitHub fetch.
@@ -658,7 +671,19 @@ func touchAutoUpdateMarker() {
 }
 
 // autoUpdate checks GitHub for a newer release and self-updates if found.
+//
+// Disabled when XALGORIX_DISABLE_AUTO_UPDATE is set to a truthy value
+// (1/true/yes/on, case-insensitive). The kill switch is mandatory in any
+// deployment built from a fork — the GitHub URL hardcoded below points at
+// the upstream xalgord/xalgorix repo, so without this gate a container
+// running a fork binary will silently overwrite itself with upstream on
+// every restart. Set the env var in your service unit / Dockerfile /
+// process manager.
 func autoUpdate() {
+	if autoUpdateDisabled() {
+		log.Printf("[auto-update] disabled via XALGORIX_DISABLE_AUTO_UPDATE")
+		return
+	}
 	if autoUpdateThrottled() {
 		return
 	}
