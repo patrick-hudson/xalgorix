@@ -1362,16 +1362,71 @@ func executeJS(ctxID, code string) (tools.Result, error) {
 	// The dialog handler auto-dismisses alerts, but we add a timeout as a safety net.
 	result, err := s.page.Timeout(10 * time.Second).Eval(code)
 	if err != nil {
+		raw := err.Error()
 		// If it timed out, it's likely a blocking dialog that wasn't caught
-		if strings.Contains(err.Error(), "context deadline") || strings.Contains(err.Error(), "timeout") {
+		if strings.Contains(raw, "context deadline") || strings.Contains(raw, "timeout") {
 			return tools.Result{
 				Output: "⚠️ JS execution timed out (likely a blocking dialog like alert/confirm/prompt). The dialog was triggered, which confirms JavaScript execution. Use page.Eval with a non-blocking approach instead.",
 			}, nil
+		}
+		// JS-language errors (SyntaxError / ReferenceError / TypeError / etc.) are
+		// recoverable — the LLM can fix the code and re-emit. Return as a Result.Output
+		// (success path) so the agent doesn't trip the circuit breaker on what is
+		// really a code-style problem, and so the model sees actionable guidance in
+		// the same shape as a normal eval result.
+		if isJSEvalError(raw) {
+			return tools.Result{Output: formatJSEvalHint(raw)}, nil
 		}
 		return tools.Result{}, fmt.Errorf("JS error: %w", err)
 	}
 
 	return tools.Result{Output: result.Value.String()}, nil
+}
+
+// jsEvalErrorSignatures lists the V8/JS engine error names that indicate the
+// LLM's code itself was broken (vs. infrastructure errors like "browser not
+// launched"). Keep these as exact JS error-class names so we don't false-match
+// on stack traces that happen to mention them.
+var jsEvalErrorSignatures = []string{
+	"SyntaxError",
+	"ReferenceError",
+	"TypeError",
+	"RangeError",
+	"EvalError",
+	"URIError",
+}
+
+// isJSEvalError reports whether a go-rod Eval error wraps a JS-language error
+// the LLM can fix by rewriting its code.
+func isJSEvalError(s string) bool {
+	for _, sig := range jsEvalErrorSignatures {
+		if strings.Contains(s, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// formatJSEvalHint turns a raw go-rod error into a Result.Output the LLM can
+// read on its next turn. Strips the trailing "<nil>" go-rod appends when the
+// wrapped error chain bottoms out in a nil Unwrap, and appends concrete
+// guidance for the two most common LLM mistakes:
+//   - emitting statements where Eval expects an expression
+//   - forgetting to return a value from the IIFE body
+func formatJSEvalHint(raw string) string {
+	clean := strings.TrimSpace(raw)
+	clean = strings.TrimSuffix(clean, "<nil>")
+	clean = strings.TrimSpace(clean)
+	return fmt.Sprintf(
+		"⚠️ JS eval error (recoverable — re-emit the call with corrected code):\n%s\n\n"+
+			"Guidance: page.Eval expects an expression. To run statements, wrap them in an IIFE that RETURNS a value:\n"+
+			"  (() => { const x = document.title; return x; })()\n"+
+			"Common fixes:\n"+
+			"  - Replace bare `var x = 5; x` with `(() => { const x = 5; return x; })()`\n"+
+			"  - Replace `console.log(...)` (returns undefined) with explicit `return ...`\n"+
+			"  - For DOM queries, return the value: `(() => document.querySelector('a').href)()`",
+		clean,
+	)
 }
 
 func newTab(ctxID, rawURL string) (tools.Result, error) {

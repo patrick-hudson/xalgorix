@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/go-rod/rod/lib/proto"
@@ -140,6 +141,66 @@ func TestBrowserStore_Initialization(t *testing.T) {
 	}
 	if s.nextTab != 1 {
 		t.Errorf("new store nextTab = %d, want 1", s.nextTab)
+	}
+}
+
+// ── isJSEvalError / formatJSEvalHint ──
+
+func TestIsJSEvalError_Recognizes(t *testing.T) {
+	cases := []string{
+		"eval js error: SyntaxError: Unexpected token 'var' <nil>",
+		"eval js error: ReferenceError: foo is not defined",
+		"eval js error: TypeError: Cannot read properties of null",
+		"eval js error: RangeError: Maximum call stack size exceeded",
+		"eval js error: EvalError: some message",
+		"eval js error: URIError: malformed URI",
+	}
+	for _, in := range cases {
+		if !isJSEvalError(in) {
+			t.Errorf("isJSEvalError(%q) = false, want true", in)
+		}
+	}
+}
+
+func TestIsJSEvalError_Rejects(t *testing.T) {
+	cases := []string{
+		"browser not launched",
+		"context deadline exceeded",
+		"navigation timeout: net::ERR_TIMED_OUT",
+		"",
+	}
+	for _, in := range cases {
+		if isJSEvalError(in) {
+			t.Errorf("isJSEvalError(%q) = true, want false", in)
+		}
+	}
+}
+
+func TestFormatJSEvalHint_StripsNilTailAndIncludesGuidance(t *testing.T) {
+	raw := "eval js error: SyntaxError: Unexpected token 'var' <nil>"
+	out := formatJSEvalHint(raw)
+	// Trailing "<nil>" must be gone — that's the go-rod chain artifact
+	// confusing the LLM in its conversation history.
+	if strings.Contains(out, "<nil>") {
+		t.Errorf("formatJSEvalHint output still contains '<nil>': %q", out)
+	}
+	// The original error text minus the <nil> should still be visible.
+	if !strings.Contains(out, "SyntaxError: Unexpected token 'var'") {
+		t.Errorf("formatJSEvalHint output missing original error: %q", out)
+	}
+	// IIFE guidance and the two common-fix bullets are load-bearing for the
+	// LLM's self-recovery; lock them in.
+	for _, needle := range []string{
+		"recoverable",
+		"page.Eval expects an expression",
+		"(() => { const x = document.title; return x; })()",
+		"Replace bare `var x = 5; x`",
+		"Replace `console.log(...)`",
+		"For DOM queries, return the value",
+	} {
+		if !strings.Contains(out, needle) {
+			t.Errorf("formatJSEvalHint output missing guidance %q\nfull output:\n%s", needle, out)
+		}
 	}
 }
 

@@ -788,15 +788,35 @@ func (a *Agent) SendMessage(message string) (string, error) {
 	return "Message received and will be processed on the next iteration.", nil
 }
 
-// formatToolResult formats tool execution results with helpful suggestions
+// universalRecoveryPreamble is appended to any tool-error result that doesn't
+// match a more specific suggestion in getToolSuggestion. It primes the model
+// to retry / rephrase / pivot instead of calling finish on a single tool
+// failure. Kept as a const so the tests can assert on it without re-typing
+// the whole thing.
+const universalRecoveryPreamble = "Recovery: tool errors are not fatal in this agent. " +
+	"Pick ONE of:\n" +
+	"  1. Re-emit the call with corrected arguments (typos, wrong path, bad flag).\n" +
+	"  2. Try a different tool that achieves the same goal (e.g. send_request instead of curl, python_action instead of `python3 -c`, fileedit instead of `sed`).\n" +
+	"  3. Gather more context first (read_file, list_skills, send_request to inspect the target) and then retry.\n" +
+	"Do NOT call `finish` on a single tool error — only finish when the scan goal is complete.\n"
+
+// formatToolResult formats tool execution results with helpful suggestions.
+// Tool errors are framed as recoverable to keep the model from spiralling or
+// calling `finish` after the first failure — the agent loop always continues
+// after a tool error anyway; this wording matches that reality and adds a
+// fallback recovery preamble when no specific suggestion matched.
 func formatToolResult(toolName string, result tools.Result) string {
 	output := result.Output
 	errorMsg := result.Error
 
 	var msg string
 	if errorMsg != "" {
-		msg = fmt.Sprintf("Tool '%s' error: %s\n", toolName, errorMsg)
-		msg += getToolSuggestion(toolName, errorMsg)
+		msg = fmt.Sprintf("Tool '%s' returned an error (recoverable): %s\n", toolName, errorMsg)
+		suggestion := getToolSuggestion(toolName, errorMsg)
+		if suggestion == "" {
+			suggestion = universalRecoveryPreamble
+		}
+		msg += suggestion
 	} else if output != "" {
 		msg = fmt.Sprintf("Tool '%s' result:\n%s", toolName, output)
 	} else {
@@ -818,6 +838,21 @@ func getToolSuggestion(toolName, errorMsg string) string {
 	}
 	if strings.Contains(lower, "missing required parameter") {
 		return "Suggestion: You omitted a required parameter, or used the wrong key name. Use <parameter=KEY>VALUE</parameter> (with '=', not <parameter name=\"KEY\">). The error lists the exact required params for this tool.\n"
+	}
+	// Python SyntaxError surfacing through terminal_execute almost always
+	// means the LLM passed code through `python3 -c "..."` (or a here-doc)
+	// and bash interpolation mangled the source before Python parsed it.
+	// python_action runs the same code without any shell between the model
+	// and Python, so complex strings (regex, JSON, embedded quotes) work as
+	// written. Requiring the Python-traceback marker keeps this from
+	// firing on unrelated SyntaxError surfaces (e.g. JS).
+	if strings.Contains(lower, "syntaxerror") &&
+		(strings.Contains(lower, `file "<string>"`) || strings.Contains(lower, `file "<stdin>"`)) {
+		return "Suggestion: Python failed with a SyntaxError inside a shell-passed string. " +
+			"bash interpolation likely mangled the source (escaped quotes, regex backslashes, " +
+			"f-strings, etc.) before Python saw it. Switch to the python_action tool — it " +
+			"takes the code in a <parameter=code>…</parameter> body and runs it directly with " +
+			"no shell quoting, so complex strings (regex, JSON, embedded quotes) work as written.\n"
 	}
 
 	switch {
