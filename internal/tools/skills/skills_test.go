@@ -20,12 +20,14 @@ func setupTestSkills(t *testing.T) string {
 		os.MkdirAll(filepath.Join(dir, cat), 0755)
 	}
 
-	// Create test skill files in new directory/SKILL.md format
+	// Create test skill files in new directory/SKILL.md format.
+	// Use a kebab-case name that is NOT in skillAliases so the lookup
+	// hits this fixture directly instead of being redirected.
 	files := map[string]string{
-		"vulnerabilities/sql_injection/SKILL.md": "# SQL Injection\nTest payloads...",
-		"vulnerabilities/xss/SKILL.md":           "# XSS\nReflected payloads...",
-		"protocols/graphql/SKILL.md":             "# GraphQL\nIntrospection...",
-		"frameworks/django/SKILL.md":             "# Django\nDebug mode...",
+		"vulnerabilities/sql-injection-test/SKILL.md": "# SQL Injection\nTest payloads...",
+		"vulnerabilities/xss/SKILL.md":                "# XSS\nReflected payloads...",
+		"protocols/graphql/SKILL.md":                  "# GraphQL\nIntrospection...",
+		"frameworks/django/SKILL.md":                  "# Django\nDebug mode...",
 	}
 	for path, content := range files {
 		os.MkdirAll(filepath.Join(dir, filepath.Dir(path)), 0755)
@@ -43,7 +45,7 @@ func TestReadSkill_Basic(t *testing.T) {
 	fn := makeReadSkill(os.DirFS(dir))
 
 	// Read existing skill
-	result, err := fn(map[string]string{"name": "sql_injection"})
+	result, err := fn(map[string]string{"name": "sql-injection-test"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -57,7 +59,7 @@ func TestReadSkill_WithExtension(t *testing.T) {
 	fn := makeReadSkill(os.DirFS(dir))
 
 	// Should work with .md extension too
-	result, err := fn(map[string]string{"name": "sql_injection.md"})
+	result, err := fn(map[string]string{"name": "sql-injection-test.md"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -143,8 +145,8 @@ func TestListSkills_All(t *testing.T) {
 	}
 
 	// Should list all skills across categories
-	if !strings.Contains(result.Output, "sql_injection") {
-		t.Error("expected sql_injection in output")
+	if !strings.Contains(result.Output, "sql-injection-test") {
+		t.Error("expected sql-injection-test in output")
 	}
 	if !strings.Contains(result.Output, "graphql") {
 		t.Error("expected graphql in output")
@@ -169,8 +171,8 @@ func TestListSkills_FilterCategory(t *testing.T) {
 	if !strings.Contains(result.Output, "graphql") {
 		t.Error("expected graphql in protocols output")
 	}
-	if strings.Contains(result.Output, "sql_injection") {
-		t.Error("should NOT contain sql_injection when filtering protocols")
+	if strings.Contains(result.Output, "sql-injection-test") {
+		t.Error("should NOT contain sql-injection-test when filtering protocols")
 	}
 }
 
@@ -201,6 +203,15 @@ func TestResolveAlias(t *testing.T) {
 		{"cors", "testing-cors-misconfiguration"},
 		{"jwt", "exploiting-jwt-algorithm-confusion-attack"},
 		{"oauth", "exploiting-oauth-misconfiguration"},
+		// New aliases that backfill names the system prompt historically advertised.
+		{"oauth2-attacks", "exploiting-oauth-misconfiguration"},
+		{"authentication-jwt", "testing-jwt-token-security"},
+		{"prototype-pollution", "exploiting-prototype-pollution-in-javascript"},
+		{"http-request-smuggling", "exploiting-http-request-smuggling"},
+		{"cache-poisoning", "performing-web-cache-poisoning-attack"},
+		{"websocket-hijacking", "exploiting-websocket-vulnerabilities"},
+		{"dom-xss", "testing-for-xss-vulnerabilities"},
+		{"2fa-mfa-bypass", "bypassing-authentication-with-forced-browsing"},
 		{"nmap", "scanning-network-with-nmap-advanced"},
 		{"recon", "conducting-external-reconnaissance-with-osint"},
 		{"privesc", "detecting-privilege-escalation-attempts"},
@@ -245,5 +256,39 @@ func TestReadSkill_Alias(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "SQL Injection") {
 		t.Errorf("alias 'sqli' should resolve to full skill, got: %s", result.Output)
+	}
+}
+
+// TestReadSkill_UnderscoreNormalization verifies that an underscore-form
+// skill name (the shape the model historically saw in the system prompt)
+// collapses to the kebab-case alias and resolves to the canonical skill.
+func TestReadSkill_UnderscoreNormalization(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "web-application-security", "exploiting-oauth-misconfiguration"), 0755)
+	os.WriteFile(
+		filepath.Join(dir, "web-application-security", "exploiting-oauth-misconfiguration", "SKILL.md"),
+		[]byte("# OAuth Misconfiguration\nAttack methodology..."),
+		0644,
+	)
+
+	fn := makeReadSkill(os.DirFS(dir))
+
+	// Underscore form — what the prompt historically advertised and what
+	// the model still occasionally emits.
+	result, err := fn(map[string]string{"name": "oauth2_attacks"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result.Output, "OAuth Misconfiguration") {
+		t.Errorf("oauth2_attacks (underscore) should normalize + alias to exploiting-oauth-misconfiguration, got: %s", result.Output)
+	}
+
+	// Kebab form of the same name — also aliased.
+	result, err = fn(map[string]string{"name": "oauth2-attacks"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result.Output, "OAuth Misconfiguration") {
+		t.Errorf("oauth2-attacks should alias to exploiting-oauth-misconfiguration, got: %s", result.Output)
 	}
 }

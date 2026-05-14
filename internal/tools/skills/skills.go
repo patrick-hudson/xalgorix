@@ -221,6 +221,43 @@ var skillAliases = map[string]string{
 	// ── Misc ─────────────────────────────────────────────────────────
 	"darkweb":             "monitoring-darkweb-sources",
 	"dmarc":               "performing-dmarc-policy-enforcement-rollout",
+
+	// ── Names the system prompt historically advertised ──────────────
+	// (or that Claude invents from the prompt's vocabulary) but which
+	// don't match any actual skill-directory name. Mapped to the
+	// closest real skill so read_skill resolves them instead of failing.
+	// `saml-attacks` is intentionally left unmapped — the only SAML
+	// skill in the catalog is defensive (`implementing-saml-sso-...`),
+	// which would mislead an offensive agent.
+	"oauth2-attacks":          "exploiting-oauth-misconfiguration",
+	"oauth-attacks":           "exploiting-oauth-misconfiguration",
+	"oauth-misconfiguration":  "exploiting-oauth-misconfiguration",
+	"jwt-attacks":             "exploiting-jwt-algorithm-confusion-attack",
+	"jwt-algorithm-confusion": "exploiting-jwt-algorithm-confusion-attack",
+	"authentication-jwt":      "testing-jwt-token-security",
+	"jwt-token-security":      "testing-jwt-token-security",
+	"2fa-bypass":              "bypassing-authentication-with-forced-browsing",
+	"mfa-bypass":              "bypassing-authentication-with-forced-browsing",
+	"2fa-mfa-bypass":          "bypassing-authentication-with-forced-browsing",
+
+	"prototype-pollution":    "exploiting-prototype-pollution-in-javascript",
+	"http-request-smuggling": "exploiting-http-request-smuggling",
+	"request-smuggling":      "exploiting-http-request-smuggling",
+	"cache-poisoning":        "performing-web-cache-poisoning-attack",
+	"web-cache-poisoning":    "performing-web-cache-poisoning-attack",
+	"web-cache-deception":    "performing-web-cache-deception-attack",
+	"websocket-hijacking":    "exploiting-websocket-vulnerabilities",
+	"websocket-attacks":      "exploiting-websocket-vulnerabilities",
+	"websocket-vulns":        "exploiting-websocket-vulnerabilities",
+	"dom-xss":                "testing-for-xss-vulnerabilities",
+	"reflected-xss":          "testing-for-xss-vulnerabilities",
+	"stored-xss":             "testing-for-xss-vulnerabilities",
+	"host-header-attacks":    "testing-for-host-header-injection",
+	"host-header-injection":  "testing-for-host-header-injection",
+	"crlf-injection":         "testing-for-email-header-injection",
+	"header-injection":       "testing-for-email-header-injection",
+	"insecure-file-uploads":  "exploiting-file-upload-vulnerabilities",
+	"file-upload-bypass":     "exploiting-file-upload-vulnerabilities",
 }
 
 // resolveAlias returns the canonical skill name for a shorthand alias.
@@ -254,6 +291,12 @@ func makeReadSkill(fsys fs.FS) func(args map[string]string) (tools.Result, error
 		if name == "" {
 			return tools.Result{Error: "skill name is empty after sanitization"}, nil
 		}
+
+		// Collapse underscore-style names ("oauth2_attacks") into the kebab-case
+		// form the catalog and the alias map use ("oauth2-attacks"). The system
+		// prompt historically advertised some underscore names, and Claude
+		// invents underscore variants on its own.
+		name = strings.ReplaceAll(name, "_", "-")
 
 		// Resolve common shorthand aliases (e.g. "xss" → full skill name).
 		name = resolveAlias(name)

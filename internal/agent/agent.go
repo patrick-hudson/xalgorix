@@ -1337,23 +1337,28 @@ You have access to **expert-level vulnerability skills** via the read_skill and 
 - Cloud security testing (AWS, Azure, GCP, Kubernetes, CI/CD)
 - Chaining strategies to escalate low-severity findings into critical exploits
 
+Skill names are kebab-case (e.g. 'exploiting-oauth-misconfiguration'). Many short
+aliases also resolve (e.g. 'xss', 'sqli', 'ssrf', 'jwt', 'oauth'). **If you don't
+know the exact name, call list_skills FIRST — guessing burns turns.**
+
 ### MANDATORY Skill Loading Rules:
 1. **After Phase 1 recon** → call list_skills to see all available knowledge
-2. **Before testing ANY vulnerability class** → call read_skill to load the deep methodology
-   - Found a JSON API? → read_skill(name="nosql_injection") AND read_skill(name="mass_assignment")
-   - Found Node.js? → read_skill(name="prototype_pollution") AND read_skill(category="frameworks", name="express")
-   - Found OAuth/login? → read_skill(name="oauth2_attacks") AND read_skill(name="2fa_mfa_bypass")
-   - Found file upload? → read_skill(name="insecure_file_uploads")
-   - Behind CDN/cache? → read_skill(name="cache_poisoning") AND read_skill(name="http_request_smuggling")
-   - Found WebSocket? → read_skill(name="websocket_hijacking")
+2. **Before testing ANY vulnerability class** → call read_skill to load the deep methodology. Examples (all real, verified names):
+   - JSON API → read_skill name=exploiting-nosql-injection-vulnerabilities AND name=exploiting-mass-assignment-in-rest-apis
+   - OAuth / login → read_skill name=exploiting-oauth-misconfiguration AND name=testing-jwt-token-security
+   - Node.js / Express → read_skill name=exploiting-prototype-pollution-in-javascript
+   - File upload → read_skill name=exploiting-file-upload-vulnerabilities
+   - Behind CDN / cache → read_skill name=performing-web-cache-poisoning-attack AND name=exploiting-http-request-smuggling
+   - WebSocket → read_skill name=exploiting-websocket-vulnerabilities
+   - SSRF → read_skill name=exploiting-server-side-request-forgery
 3. **Load skills for the target's tech stack** — the framework skills (Django, Laravel, NestJS, etc.) contain technology-specific attack vectors that generic testing misses
 4. **Skills make you 10x more effective** — they contain techniques that scanners like nuclei can NEVER find
 
 ### High-Impact Skills to Prioritize:
-- nosql_injection, http_request_smuggling, cache_poisoning, dom_xss (P1-P2 bounties)
-- oauth2_attacks, saml_attacks, 2fa_mfa_bypass (auth bypass chains)
-- prototype_pollution, insecure_deserialization, websocket_hijacking (emerging attack vectors)
-- host_header_attacks, crlf_injection, web_cache_deception (commonly missed)
+- exploiting-nosql-injection-vulnerabilities, exploiting-http-request-smuggling, performing-web-cache-poisoning-attack, testing-for-xss-vulnerabilities (P1-P2 bounties)
+- exploiting-oauth-misconfiguration, testing-jwt-token-security, bypassing-authentication-with-forced-browsing (auth bypass chains)
+- exploiting-prototype-pollution-in-javascript, exploiting-insecure-deserialization, exploiting-websocket-vulnerabilities (emerging attack vectors)
+- testing-for-host-header-injection, performing-web-cache-deception-attack (commonly missed)
 
 ## Available Tools
 %s
@@ -2121,9 +2126,9 @@ for param in redirect_params:
 ⚠️ The report_vulnerability tool will REJECT any SPF/DMARC/DKIM findings.
 
 **Instead, focus on exploitable email vulnerabilities:**
-- Email header injection in contact/registration forms (read_skill name="email_header_injection")
+- Email header injection in contact/registration forms (read_skill name="testing-for-email-header-injection")
 - Password reset token prediction or leak via Referer header
-- Host header poisoning in password reset emails (read_skill name="host_header_attacks")
+- Host header poisoning in password reset emails (read_skill name="testing-for-host-header-injection")
 - Account takeover via email change without re-authentication
 
 ### PHASE 16: Cloud & Infrastructure
