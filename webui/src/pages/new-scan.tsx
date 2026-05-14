@@ -161,7 +161,7 @@ export default function NewScanPage() {
           Start a new scan
         </h1>
         <p className="mt-1 text-sm text-muted-foreground text-pretty">
-          Configure target, scope, and methodology phases. Xalgorix orchestrates
+          Configure target, scope, and methodology phases. Viney orchestrates
           recon and active probes, then synthesizes findings with the agent.
         </p>
       </div>

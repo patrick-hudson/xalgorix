@@ -45,7 +45,7 @@ export function BackendUnreachable() {
               <div>
                 <CardTitle className="text-balance">Backend unreachable</CardTitle>
                 <CardDescription>
-                  The Xalgorix API isn&apos;t responding on this host.
+                  The Viney API isn&apos;t responding on this host.
                 </CardDescription>
               </div>
             </div>

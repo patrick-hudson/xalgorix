@@ -190,7 +190,7 @@ export default function ScanDetailPage() {
           <CardHeader>
             <CardTitle className="text-sm">Phase progress</CardTitle>
             <CardDescription>
-              Xalgorix runs a 10-phase autonomous methodology. Currently:{" "}
+              Viney runs a 10-phase autonomous methodology. Currently:{" "}
               <span className="text-foreground">
                 {currentPhaseLabel(scan.current_phase)}
               </span>

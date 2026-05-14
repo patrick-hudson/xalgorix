@@ -4,8 +4,8 @@ const STYLES: Record<Severity, string> = {
   critical: "bg-red-500/10 text-red-400 border-red-500/30",
   high: "bg-orange-500/10 text-orange-400 border-orange-500/30",
   medium: "bg-amber-500/10 text-amber-400 border-amber-500/30",
-  low: "bg-blue-500/10 text-blue-400 border-blue-500/30",
-  info: "bg-neutral-500/10 text-neutral-400 border-neutral-500/30",
+  low: "bg-green-500/10 text-green-400 border-green-500/30",
+  info: "bg-sky-500/10 text-sky-400 border-sky-500/30",
 };
 
 export function SeverityBadge({
@@ -22,8 +22,8 @@ export function SeverityBadge({
     critical: "bg-red-500",
     high: "bg-orange-500",
     medium: "bg-amber-500",
-    low: "bg-blue-500",
-    info: "bg-neutral-500",
+    low: "bg-green-500",
+    info: "bg-sky-500",
   };
   return (
     <span

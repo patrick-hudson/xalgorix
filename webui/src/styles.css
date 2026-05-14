@@ -1,44 +1,44 @@
 @import "tailwindcss";
 
-/* Geist + Vercel-inspired dark design tokens for Xalgorix. */
+/* Squashy-inspired navy + sky-blue dark design tokens for Viney. */
 @theme {
-  --color-background: #050505;
-  --color-foreground: #fafafa;
+  --color-background: #0f1419;
+  --color-foreground: #e8ecf1;
 
-  --color-card: #0a0a0a;
-  --color-card-foreground: #fafafa;
+  --color-card: #1a2332;
+  --color-card-foreground: #e8ecf1;
 
-  --color-popover: #0a0a0a;
-  --color-popover-foreground: #fafafa;
+  --color-popover: #1a2332;
+  --color-popover-foreground: #e8ecf1;
 
-  --color-primary: #fafafa;
-  --color-primary-foreground: #0a0a0a;
+  --color-primary: #5b9fd4;
+  --color-primary-foreground: #0f1419;
 
-  --color-secondary: #111111;
-  --color-secondary-foreground: #fafafa;
+  --color-secondary: #243044;
+  --color-secondary-foreground: #e8ecf1;
 
-  --color-muted: #111111;
-  --color-muted-foreground: #a1a1aa;
+  --color-muted: #243044;
+  --color-muted-foreground: #8b9cad;
 
-  --color-accent: #1a1a1a;
-  --color-accent-foreground: #fafafa;
+  --color-accent: #243044;
+  --color-accent-foreground: #e8ecf1;
 
-  --color-border: #262626;
-  --color-input: #1a1a1a;
-  --color-ring: #404040;
+  --color-border: #2d3a4f;
+  --color-input: #1a2332;
+  --color-ring: #5b9fd4;
 
-  --color-destructive: #ef4444;
-  --color-destructive-foreground: #fafafa;
+  --color-destructive: #f85149;
+  --color-destructive-foreground: #e8ecf1;
 
   /* Severity palette */
-  --color-severity-critical: #dc2626;
-  --color-severity-high: #ea580c;
-  --color-severity-medium: #ca8a04;
-  --color-severity-low: #2563eb;
-  --color-severity-info: #525252;
+  --color-severity-critical: #f85149;
+  --color-severity-high: #ff9f43;
+  --color-severity-medium: #f0c14d;
+  --color-severity-low: #3fb950;
+  --color-severity-info: #79c0ff;
 
-  --color-success: #10b981;
-  --color-warning: #f59e0b;
+  --color-success: #3fb950;
+  --color-warning: #ff9f43;
 
   --radius-sm: 6px;
   --radius-md: 10px;
@@ -79,11 +79,11 @@
   }
 
   ::selection {
-    background: #ffffff;
-    color: #000000;
+    background: #5b9fd4;
+    color: #0f1419;
   }
 
-  /* Subtle scrollbar that matches the Vercel feel */
+  /* Subtle scrollbar that matches the navy theme */
   ::-webkit-scrollbar {
     width: 10px;
     height: 10px;
@@ -92,12 +92,12 @@
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: #1a1a1a;
+    background: #243044;
     border-radius: 6px;
     border: 2px solid var(--color-background);
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: #2a2a2a;
+    background: #2d3a4f;
   }
 }
 
@@ -108,8 +108,8 @@
     border-color 0.15s ease;
 }
 .card-hover:hover {
-  background-color: #0d0d0d;
-  border-color: #2f2f2f;
+  background-color: #243044;
+  border-color: #5b9fd4;
 }
 
 /* Animated connection dot */
