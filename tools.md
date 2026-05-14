@@ -16,7 +16,7 @@ Complete list of **70+ security tools** included in Xalgorix - the most powerful
 | 8 | **hakrawler** | Web crawling | `go install github.com/hakluke/hakrawler@latest` |
 | 9 | **gau** | Get All URLs | `go install github.com/lc/gau/v2/cmd/gau@latest` |
 | 10 | **waybackurls** | Wayback Machine URLs | `go install github.com/tomnomnom/waybackurls@latest` |
-| 11 | **paramspider** | Parameter discovery | `pipx install paramspider` |
+| 11 | **paramspider** | Parameter discovery | `pipx install git+https://github.com/devanshbatham/ParamSpider` |
 | 12 | **crt.sh** | Certificate transparency | `curl -s "https://crt.sh/?q=target.com"` |
 | 13 | **bufferover** | DNS enumeration | `curl -s "https://dns.bufferover.run/dns?q=target.com"` |
 | 14 | **webarchive** | Historical URLs | `curl -s "https://web.archive.org/cdx/search/cdx?url=*.target.com/*"` |
