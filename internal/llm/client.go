@@ -26,9 +26,10 @@ type Message struct {
 
 // StreamChunk is a piece of streaming response.
 type StreamChunk struct {
-	Content string
-	Done    bool
-	Err     error
+	Content    string
+	Done       bool
+	Err        error
+	StopReason string // populated on the Done=true chunk so callers can detect truncation
 }
 
 // Client is the LLM API client.
@@ -80,7 +81,12 @@ func NewClient(cfg *config.Config) *Client {
 	}
 	c := &Client{
 		cfg:        cfg,
-		httpClient: &http.Client{Timeout: 10 * time.Minute},
+		// 30 minutes covers any single Sonnet 4.6 turn even at max_tokens=32k.
+		// With streaming, this is the cap on total request lifetime (not
+		// time-to-headers, which arrives in <1s on SSE); the non-streaming
+		// Chat path also uses this client and benefits from the higher ceiling
+		// when bedrock-access-gateway buffers a long response.
+		httpClient: &http.Client{Timeout: 30 * time.Minute},
 		apiModel:   apiModel,
 		provider:   provider,
 	}
@@ -229,7 +235,8 @@ type anthropicResponse struct {
 	Type    string           `json:"type"`
 	Message anthropicMessage `json:"message,omitempty"`
 	Delta   struct {
-		Text string `json:"text"`
+		Text       string `json:"text"`        // populated on content_block_delta
+		StopReason string `json:"stop_reason"` // populated on message_delta (final event)
 	} `json:"delta,omitempty"`
 	Index int `json:"index,omitempty"`
 }
@@ -413,6 +420,110 @@ func (c *Client) ChatWithMeta(messages []Message) (string, ChatMeta, error) {
 	return c.chatWithRetryMeta(messages)
 }
 
+// ChatStreamFull is the streaming sibling of ChatWithMeta. It opens an
+// SSE stream to the LLM, concatenates the content chunks into a single
+// response string, and returns the same (content, ChatMeta, error)
+// triple as ChatWithMeta — so callers can swap call sites with no
+// downstream changes.
+//
+// Why prefer this over ChatWithMeta:
+//   - HTTP response headers arrive in <1s on the streaming endpoint,
+//     so the http.Client.Timeout never fires "while awaiting headers"
+//     on long generations (the failure mode that surfaced once we bumped
+//     max_tokens to 32k and bedrock-access-gateway started buffering the
+//     full response for many minutes).
+//   - StopReason still flows through, populated from the terminal Done
+//     chunk's finish_reason / stop_reason — agent truncation detection
+//     keeps working unchanged.
+//
+// The retry / non-retryable / rate-limit semantics mirror
+// chatWithRetryMeta exactly; the only difference is which underlying
+// single-shot function is called per attempt.
+func (c *Client) ChatStreamFull(messages []Message) (string, ChatMeta, error) {
+	return c.chatStreamWithRetry(messages)
+}
+
+func (c *Client) chatStreamWithRetry(messages []Message) (string, ChatMeta, error) {
+	maxRetries := c.cfg.LLMMaxRetries
+	if maxRetries < 3 {
+		maxRetries = 3
+	}
+	var lastErr error
+
+	for attempt := range maxRetries {
+		if attempt > 0 {
+			backoff := time.Duration(attempt*3) * time.Second
+			if lastErr != nil {
+				errStr := lastErr.Error()
+				if isRateLimitError(errStr) {
+					backoff = 30 * time.Second
+				} else if strings.Contains(errStr, "connection") || strings.Contains(errStr, "timeout") || strings.Contains(errStr, "EOF") {
+					backoff = time.Duration(attempt*10) * time.Second
+				} else if strings.Contains(errStr, "500") || strings.Contains(errStr, "502") || strings.Contains(errStr, "503") {
+					backoff = time.Duration(attempt*5) * time.Second
+				}
+			}
+			if backoff > 60*time.Second {
+				backoff = 60 * time.Second
+			}
+			log.Printf("[llm-stream] Retry %d/%d after %s (last error: %v)", attempt+1, maxRetries, backoff, lastErr)
+			time.Sleep(backoff)
+		}
+
+		if ctx := c.loadCtx(); ctx.Err() != nil {
+			return "", ChatMeta{}, fmt.Errorf("LLM request cancelled: %w", ctx.Err())
+		}
+
+		result, meta, err := c.doChatStream(messages)
+		if err == nil {
+			return result, meta, nil
+		}
+		lastErr = err
+
+		errStr := err.Error()
+		if isContextWindowError(errStr) {
+			log.Printf("[llm-stream] Non-retryable error (context overflow), returning immediately: %v", err)
+			return "", ChatMeta{}, fmt.Errorf("context window overflow: %w", err)
+		}
+
+		if isNonRetryableLLMError(errStr) {
+			log.Printf("[llm-stream] Non-retryable LLM error, returning immediately: %v", err)
+			return "", ChatMeta{}, fmt.Errorf("LLM request failed: %w", err)
+		}
+
+		if isRateLimitError(errStr) {
+			lastErr = fmt.Errorf("rate limited: %w", err)
+			continue
+		}
+	}
+
+	if lastErr != nil && strings.Contains(lastErr.Error(), "rate limited:") {
+		return "", ChatMeta{}, fmt.Errorf("rate limited: LLM request failed after %d retries: %w", maxRetries, lastErr)
+	}
+	return "", ChatMeta{}, fmt.Errorf("LLM request failed after %d retries: %w", maxRetries, lastErr)
+}
+
+// doChatStream is the single-shot streaming attempt. Drains ChatStream
+// and concatenates content; StopReason is carried on the terminal Done
+// chunk by the streaming parsers.
+func (c *Client) doChatStream(messages []Message) (string, ChatMeta, error) {
+	var b strings.Builder
+	var meta ChatMeta
+	for chunk := range c.ChatStream(messages) {
+		if chunk.Err != nil {
+			return "", ChatMeta{}, chunk.Err
+		}
+		if chunk.Content != "" {
+			b.WriteString(chunk.Content)
+		}
+		if chunk.Done {
+			meta.StopReason = chunk.StopReason
+			break
+		}
+	}
+	return b.String(), meta, nil
+}
+
 func (c *Client) chatWithRetryMeta(messages []Message) (string, ChatMeta, error) {
 	maxRetries := c.cfg.LLMMaxRetries
 	if maxRetries < 3 {
@@ -583,9 +694,13 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 		scanner.Buffer(buf, 1024*1024)
 
 		if isAnthropic {
-			// Anthropic SSE: each line is "event: TYPE" followed by "data: JSON"
+			// Anthropic SSE: each line is "event: TYPE" followed by "data: JSON".
+			// stop_reason arrives on the message_delta event right before
+			// message_stop; capture it so we can attach it to the terminal
+			// Done chunk for the agent's truncation-detection path.
 			var currentEvent string
 			var anResp anthropicResponse
+			var lastStopReason string
 			for scanner.Scan() {
 				line := scanner.Text()
 				line = strings.TrimSpace(line)
@@ -617,17 +732,22 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 						ch <- StreamChunk{Content: anResp.Delta.Text}
 					}
 				case "message_delta":
-					// Final usage update if present
+					// delta.stop_reason arrives here on the second-to-last event.
+					if anResp.Delta.StopReason != "" {
+						lastStopReason = anResp.Delta.StopReason
+					}
 				case "message_stop":
-					ch <- StreamChunk{Done: true}
+					ch <- StreamChunk{Done: true, StopReason: lastStopReason}
 					return
 				}
 			}
-			ch <- StreamChunk{Done: true}
+			ch <- StreamChunk{Done: true, StopReason: lastStopReason}
 			return
 		}
 
-		// OpenAI/Google streaming: "data: JSON" lines
+		// OpenAI/Google streaming: "data: JSON" lines. finish_reason on the
+		// last delta is the truncation signal we need to forward.
+		var lastFinishReason string
 		for scanner.Scan() {
 			line := scanner.Text()
 			if !strings.HasPrefix(line, "data: ") {
@@ -636,7 +756,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 
 			data := strings.TrimPrefix(line, "data: ")
 			if data == "[DONE]" {
-				ch <- StreamChunk{Done: true}
+				ch <- StreamChunk{Done: true, StopReason: lastFinishReason}
 				return
 			}
 
@@ -645,10 +765,16 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 				if err := json.Unmarshal([]byte(data), &gemResp); err != nil {
 					continue
 				}
-				if len(gemResp.Candidates) > 0 && len(gemResp.Candidates[0].Content.Parts) > 0 {
-					content := gemResp.Candidates[0].Content.Parts[0].Text
-					if content != "" {
-						ch <- StreamChunk{Content: content}
+				if len(gemResp.Candidates) > 0 {
+					cand := gemResp.Candidates[0]
+					if cand.FinishReason != "" {
+						lastFinishReason = cand.FinishReason
+					}
+					if len(cand.Content.Parts) > 0 {
+						content := cand.Content.Parts[0].Text
+						if content != "" {
+							ch <- StreamChunk{Content: content}
+						}
 					}
 				}
 			} else {
@@ -663,6 +789,9 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 					c.mu.Unlock()
 				}
 				if len(sseResp.Choices) > 0 {
+					if fr := sseResp.Choices[0].FinishReason; fr != "" {
+						lastFinishReason = fr
+					}
 					content := sseResp.Choices[0].Delta.Content
 					if content != "" {
 						ch <- StreamChunk{Content: content}
@@ -671,7 +800,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 			}
 		}
 
-		ch <- StreamChunk{Done: true}
+		ch <- StreamChunk{Done: true, StopReason: lastFinishReason}
 	}()
 
 	return ch

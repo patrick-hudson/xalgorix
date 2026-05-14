@@ -379,6 +379,101 @@ func TestChatWithMeta_AnthropicMaxTokensStopReason(t *testing.T) {
 	}
 }
 
+// TestChatStreamFull_OpenAILengthFinishReason exercises the streaming
+// path end-to-end: feed an OpenAI-compatible SSE body through the test
+// transport and confirm that ChatStreamFull (a) concatenates the delta
+// chunks, (b) lifts the terminal `finish_reason: "length"` onto the
+// returned ChatMeta, and (c) IsTruncated() reports true. This is the
+// streaming sibling of TestChatWithMeta_OpenAILengthFinishReason and
+// covers the agent's call site now that it uses ChatStreamFull.
+func TestChatStreamFull_OpenAILengthFinishReason(t *testing.T) {
+	c := NewClient(&config.Config{
+		LLM:           "openai/gpt-test",
+		APIBase:       "https://api.openai.com/v1",
+		APIKey:        "sk-test",
+		LLMMaxRetries: 1,
+	})
+	c.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		sse := strings.Join([]string{
+			`data: {"choices":[{"delta":{"content":"<function="}}]}`,
+			``,
+			`data: {"choices":[{"delta":{"content":"terminal_execute"}}]}`,
+			``,
+			`data: {"choices":[{"delta":{"content":">"}}]}`,
+			``,
+			`data: {"choices":[{"delta":{"content":""},"finish_reason":"length"}]}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		return jsonResponse(http.StatusOK, sse), nil
+	})}
+
+	got, meta, err := c.ChatStreamFull([]Message{{Role: "user", Content: "hello"}})
+	if err != nil {
+		t.Fatalf("ChatStreamFull returned error: %v", err)
+	}
+	if got != "<function=terminal_execute>" {
+		t.Errorf("ChatStreamFull content = %q, want %q", got, "<function=terminal_execute>")
+	}
+	if meta.StopReason != "length" {
+		t.Errorf("meta.StopReason = %q, want length", meta.StopReason)
+	}
+	if !meta.IsTruncated() {
+		t.Error("meta.IsTruncated() = false, want true for finish_reason=length")
+	}
+}
+
+// TestChatStreamFull_AnthropicMaxTokensStopReason mirrors the above for
+// the Anthropic native streaming protocol: event/data line pairs, with
+// stop_reason arriving on the `message_delta` event right before
+// `message_stop`. The terminal Done chunk must carry that stop_reason.
+func TestChatStreamFull_AnthropicMaxTokensStopReason(t *testing.T) {
+	c := NewClient(&config.Config{
+		LLM:           "claude-sonnet-4-20250514",
+		APIBase:       "https://api.anthropic.com",
+		APIKey:        "anthropic-key",
+		LLMMaxRetries: 1,
+	})
+	c.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		sse := strings.Join([]string{
+			`event: message_start`,
+			`data: {"message":{"usage":{"input_tokens":40,"output_tokens":0}}}`,
+			``,
+			`event: content_block_delta`,
+			`data: {"delta":{"text":"<function="}}`,
+			``,
+			`event: content_block_delta`,
+			`data: {"delta":{"text":"terminal_execute"}}`,
+			``,
+			`event: content_block_delta`,
+			`data: {"delta":{"text":">"}}`,
+			``,
+			`event: message_delta`,
+			`data: {"delta":{"stop_reason":"max_tokens"}}`,
+			``,
+			`event: message_stop`,
+			`data: {}`,
+			``,
+		}, "\n")
+		return jsonResponse(http.StatusOK, sse), nil
+	})}
+
+	got, meta, err := c.ChatStreamFull([]Message{{Role: "user", Content: "hello"}})
+	if err != nil {
+		t.Fatalf("ChatStreamFull returned error: %v", err)
+	}
+	if got != "<function=terminal_execute>" {
+		t.Errorf("ChatStreamFull content = %q, want %q", got, "<function=terminal_execute>")
+	}
+	if meta.StopReason != "max_tokens" {
+		t.Errorf("meta.StopReason = %q, want max_tokens", meta.StopReason)
+	}
+	if !meta.IsTruncated() {
+		t.Error("meta.IsTruncated() = false, want true for stop_reason=max_tokens")
+	}
+}
+
 func TestChatWithRetry_Gemini401IsNotRateLimited(t *testing.T) {
 	c := NewClient(&config.Config{
 		LLM:           "gemini-3.1-pro",

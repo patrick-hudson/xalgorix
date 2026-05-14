@@ -495,7 +495,12 @@ func (a *Agent) Run(targets []string, instruction string) {
 			a.emit(Event{Type: "message", Content: iterResult.EmitMessage, TotalTokens: tokenCount()})
 		}
 
-		response, meta, err := a.client.ChatWithMeta(a.messages)
+		// ChatStreamFull instead of ChatWithMeta: SSE headers arrive in <1s,
+		// so the http.Client.Timeout never fires "while awaiting headers" on
+		// long max_tokens=32k turns the gateway used to buffer for minutes.
+		// Returns the same (content, ChatMeta, error) triple so nothing
+		// downstream (truncation filter, formatToolResult, prune) changes.
+		response, meta, err := a.client.ChatStreamFull(a.messages)
 		// Update activity after LLM response
 		a.touchActivity()
 
