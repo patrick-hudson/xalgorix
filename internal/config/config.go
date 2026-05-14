@@ -22,6 +22,7 @@ type Config struct {
 	APIKey          string // XALGORIX_API_KEY — API key
 	ReasoningEffort string // XALGORIX_REASONING_EFFORT — "low", "medium", "high"
 	LLMMaxRetries   int    // XALGORIX_LLM_MAX_RETRIES
+	LLMMaxTokens    int    // XALGORIX_LLM_MAX_TOKENS — assistant token cap per turn (default 8192)
 	MemCompTimeout  int    // XALGORIX_MEMORY_COMPRESSOR_TIMEOUT
 
 	// Runtime settings
@@ -68,6 +69,24 @@ type Config struct {
 	// but in that case Username + (Password|PasswordHash) MUST be configured or
 	// the server will refuse to start.
 	BindAddr string // XALGORIX_BIND - listen address (default 127.0.0.1)
+
+	// TrustedOrigins is a list of public origins (scheme + host, e.g.
+	// "https://app.example.com") whose requests are accepted by the WebSocket
+	// CheckOrigin and CSRF Origin/Referer comparisons even when r.Host differs.
+	// Useful when xalgorix sits behind a reverse proxy (CloudFront, ALB) that
+	// rewrites the Host header. A leading "*." in the host (e.g.
+	// "https://*.example.com") matches any subdomain by suffix. Empty preserves
+	// the historical r.Host-only comparison.
+	TrustedOrigins []string // XALGORIX_TRUSTED_ORIGINS — comma-separated allowlist
+
+	// Target scope policy — see internal/web/target_policy.go.
+	// TargetAllowPrivateNetworks flips RFC 1918 + IPv6 ULA targets from
+	// always-blocked to allowed. Loopback, link-local, container-host
+	// shorthands, and cloud-metadata IPs remain hard-blocked regardless of this
+	// flag. Default false preserves upstream behavior.
+	TargetAllowPrivateNetworks bool     // XALGORIX_ALLOW_PRIVATE_NETWORKS
+	TargetBlocklist            []string // XALGORIX_TARGET_BLOCKLIST — extra deny CIDRs/hostnames
+	TargetAllowlist            []string // XALGORIX_TARGET_ALLOWLIST — extra allow CIDRs/hostnames
 
 	// Auto-install gating — the LLM-driven terminal tool can call apt/cargo/npm
 	// for missing binaries. Letting that happen under sudo on a multi-user box
@@ -132,6 +151,7 @@ func load() *Config {
 		APIKey:          envOr("XALGORIX_API_KEY", ""),
 		ReasoningEffort: envOr("XALGORIX_REASONING_EFFORT", "high"),
 		LLMMaxRetries:   envOrInt("XALGORIX_LLM_MAX_RETRIES", 5),
+		LLMMaxTokens:    envOrInt("XALGORIX_LLM_MAX_TOKENS", 8192),
 		MemCompTimeout:  envOrInt("XALGORIX_MEMORY_COMPRESSOR_TIMEOUT", 30),
 
 		// Runtime
@@ -171,6 +191,14 @@ func load() *Config {
 
 		// Network binding — loopback-only by default.
 		BindAddr: envOr("XALGORIX_BIND", "127.0.0.1"),
+
+		// Reverse-proxy origin allowlist (CloudFront, ALB, etc.).
+		TrustedOrigins: envOrCSV("XALGORIX_TRUSTED_ORIGINS"),
+
+		// Target scope policy.
+		TargetAllowPrivateNetworks: envOrBool("XALGORIX_ALLOW_PRIVATE_NETWORKS", false),
+		TargetBlocklist:            envOrCSV("XALGORIX_TARGET_BLOCKLIST"),
+		TargetAllowlist:            envOrCSV("XALGORIX_TARGET_ALLOWLIST"),
 
 		// Auto-install gates — default off for non-root; root sessions keep the
 		// historical behaviour so existing systemd deployments keep working.
@@ -317,6 +345,27 @@ func envOrBool(key string, fallback bool) bool {
 		return v == "1" || v == "true" || v == "yes"
 	}
 	return fallback
+}
+
+// envOrCSV returns a comma-separated env value as a slice of trimmed,
+// non-empty strings. Returns nil when the env var is unset or empty so
+// callers can use len(slice) == 0 as "not configured".
+func envOrCSV(key string) []string {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // loadEnvFile reads a KEY=VALUE env file and sets env vars.

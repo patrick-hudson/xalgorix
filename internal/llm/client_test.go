@@ -386,6 +386,108 @@ func TestChatWithRetry_NonRetryableStatusMatrix(t *testing.T) {
 	}
 }
 
+// TestIsContextWindowError covers both the historical OpenAI/DeepSeek
+// wordings and the newer Bedrock-via-gateway phrasings that previously
+// slipped past the matcher and prevented forcePruneMessages() from firing.
+func TestIsContextWindowError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  string
+		want bool
+	}{
+		// Existing matchers (regression coverage).
+		{
+			name: "openai context window 400",
+			err:  "API returned 400: This model's maximum context length is 200000 tokens.",
+			want: true,
+		},
+		{
+			name: "openai too many tokens",
+			err:  "API returned 400: too many tokens in messages",
+			want: true,
+		},
+		{
+			name: "openai token limit",
+			err:  "API returned 400: token limit exceeded",
+			want: true,
+		},
+		{
+			name: "deepseek invalid params",
+			err:  "API returned 400: invalid params",
+			want: true,
+		},
+		{
+			name: "openai context window keyword",
+			err:  "API returned 400: context window exceeded",
+			want: true,
+		},
+
+		// New Bedrock / Anthropic wordings.
+		{
+			name: "bedrock anthropic input is too long",
+			err:  `API returned 400: ValidationException: Input is too long for requested model.`,
+			want: true,
+		},
+		{
+			name: "bedrock prompt is too long",
+			err:  `API returned 400: ValidationException: prompt is too long.`,
+			want: true,
+		},
+		{
+			name: "bedrock validationexception standalone",
+			err:  `API returned 422: {"errorType":"ValidationException","errorMessage":"Some validation error"}`,
+			want: true,
+		},
+		{
+			name: "anthropic native tokens exceed",
+			err:  `API returned 400: prompt tokens exceed model limit`,
+			want: true,
+		},
+
+		// Status-only tolerance: gateway remaps to 422/500 but body wording
+		// still matches.
+		{
+			name: "bedrock 422 with input too long",
+			err:  `API returned 422: input is too long`,
+			want: true,
+		},
+		{
+			name: "bedrock 500 with input too long",
+			err:  `API returned 500: input is too long after gateway retries`,
+			want: true,
+		},
+
+		// Negatives — must NOT match.
+		{
+			name: "auth error",
+			err:  `API returned 401: invalid api key`,
+			want: false,
+		},
+		{
+			name: "rate limit",
+			err:  `API returned 429: too many requests`,
+			want: false,
+		},
+		{
+			name: "server timeout no overflow keywords",
+			err:  `API returned 504: gateway timeout`,
+			want: false,
+		},
+		{
+			name: "empty error",
+			err:  "",
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isContextWindowError(tc.err); got != tc.want {
+				t.Fatalf("isContextWindowError(%q) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRateLimitDetectionDoesNotMatchGenerateContent(t *testing.T) {
 	authErr := `API returned 401: {"error":{"status":"UNAUTHENTICATED","details":[{"metadata":{"method":"google.ai.generativelanguage.v1beta.GenerativeService.GenerateContent"}}]}}`
 	if isRateLimitError(authErr) {

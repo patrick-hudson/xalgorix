@@ -75,7 +75,7 @@ func TestIsCSRFSafe(t *testing.T) {
 			if c.referer != "" {
 				r.Header.Set("Referer", c.referer)
 			}
-			if got := isCSRFSafe(r); got != c.want {
+			if got := isCSRFSafe(r, &config.Config{}); got != c.want {
 				t.Errorf("isCSRFSafe = %v, want %v", got, c.want)
 			}
 		})

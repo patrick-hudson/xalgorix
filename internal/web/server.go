@@ -406,6 +406,84 @@ func startSessionReaper() {
 	})
 }
 
+// isOriginAllowed decides whether a given Origin (or Referer) value should
+// be accepted for a request, given an optional operator-configured allowlist
+// in cfg.TrustedOrigins. The contract is intentionally symmetric for the two
+// call sites that need it (the WebSocket Upgrader.CheckOrigin closure and
+// the Origin/Referer comparison inside isCSRFSafe).
+//
+// Returns true when ANY of the following holds:
+//   - originHeader is empty. Preserves the existing "loopback / curl / dev
+//     tooling has no Origin and is allowed" behavior.
+//   - The origin's scheme+host equals r.Host. The historical default that
+//     works whenever the upstream proxy preserves the viewer Host header.
+//   - The origin matches an entry in cfg.TrustedOrigins. This is the
+//     reverse-proxy escape hatch — see config.TrustedOrigins doc and the
+//     XALGORIX_TRUSTED_ORIGINS env var. A leading "*." in the host portion
+//     of an allowlist entry matches any subdomain by suffix (e.g.
+//     "https://*.example.com" matches "https://api.example.com" but NOT
+//     bare "https://example.com" — operators must list the apex
+//     explicitly if they want it).
+//
+// Anything else returns false (cross-origin browser request not on the
+// allowlist).
+func isOriginAllowed(r *http.Request, originHeader string, cfg *config.Config) bool {
+	if originHeader == "" {
+		return true
+	}
+
+	originURL, err := url.Parse(originHeader)
+	if err != nil || originURL.Host == "" {
+		return false
+	}
+
+	// Same-host shortcut. Compares the bare host (no scheme) so it works
+	// regardless of whether the Origin header included a port and whether
+	// r.Host did.
+	if originURL.Host == r.Host {
+		return true
+	}
+
+	if cfg == nil || len(cfg.TrustedOrigins) == 0 {
+		return false
+	}
+
+	originScheme := strings.ToLower(originURL.Scheme)
+	originHost := strings.ToLower(originURL.Host)
+	for _, entry := range cfg.TrustedOrigins {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		entryURL, err := url.Parse(entry)
+		if err != nil || entryURL.Host == "" {
+			continue
+		}
+		entryScheme := strings.ToLower(entryURL.Scheme)
+		entryHost := strings.ToLower(entryURL.Host)
+
+		// Scheme must match when the allowlist entry specifies one. An
+		// allowlist entry without a scheme (rare, but possible if an
+		// operator wrote "*.example.com") matches any scheme.
+		if entryScheme != "" && entryScheme != originScheme {
+			continue
+		}
+
+		if strings.HasPrefix(entryHost, "*.") {
+			suffix := entryHost[1:] // ".example.com"
+			if strings.HasSuffix(originHost, suffix) && len(originHost) > len(suffix) {
+				return true
+			}
+			continue
+		}
+
+		if entryHost == originHost {
+			return true
+		}
+	}
+	return false
+}
+
 // isCSRFSafe returns true when a state-changing request is verifiably
 // originated from this site. We use Origin (and Referer as a fallback)
 // because every modern browser sends one of them on POST/PUT/PATCH/DELETE.
@@ -416,13 +494,14 @@ func startSessionReaper() {
 // Policy:
 //   - Safe methods (GET/HEAD/OPTIONS) are always allowed.
 //   - Sec-Fetch-Site: same-origin/none → allow; same-site/cross-site → deny.
-//   - Else fall back to Origin/Referer host == r.Host.
+//   - Else fall back to Origin/Referer host == r.Host OR a configured
+//     entry in cfg.TrustedOrigins (see isOriginAllowed).
 //   - If none of the above are present AND the request carries our session
 //     cookie, the request looks like a browser navigation without the
 //     metadata we expected — refuse. Cookie-less non-browser clients
 //     (curl, scripts) are still allowed; an attacker has no way to forge
 //     a cookie on the victim, so allowing cookie-less requests is safe.
-func isCSRFSafe(r *http.Request) bool {
+func isCSRFSafe(r *http.Request, cfg *config.Config) bool {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return true
@@ -439,23 +518,16 @@ func isCSRFSafe(r *http.Request) bool {
 		return false
 	}
 
-	// Compare Origin/Referer host with request Host.
-	check := func(raw string) (bool, bool) {
-		if raw == "" {
-			return false, false
-		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Host == "" {
-			return false, true
-		}
-		return u.Host == r.Host, true
+	// Compare Origin/Referer against r.Host or the trusted-origins allowlist.
+	// Note: isOriginAllowed treats an empty header as allowed (the "no
+	// Origin / no Referer" case for non-browser clients), so we need to
+	// gate on header presence here to preserve the "fall through to the
+	// next header" semantic of the original implementation.
+	if origin := r.Header.Get("Origin"); origin != "" {
+		return isOriginAllowed(r, origin, cfg)
 	}
-
-	if ok, present := check(r.Header.Get("Origin")); present {
-		return ok
-	}
-	if ok, present := check(r.Header.Get("Referer")); present {
-		return ok
+	if referer := r.Header.Get("Referer"); referer != "" {
+		return isOriginAllowed(r, referer, cfg)
 	}
 
 	// Neither Origin nor Referer nor Sec-Fetch-Site present.
@@ -487,7 +559,7 @@ func authMiddleware(cfg *config.Config) func(http.Handler) http.Handler {
 			// triggering a scan via the cookie even when no password is set
 			// for local-loopback deployments.
 			if strings.HasPrefix(path, "/api/") && path != "/api/auth/login" {
-				if !isCSRFSafe(r) {
+				if !isCSRFSafe(r, cfg) {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusForbidden)
 					json.NewEncoder(w).Encode(map[string]string{
@@ -694,16 +766,13 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		// Reject cross-site WebSocket connections to prevent CSWSH attacks.
-		// Allow if no Origin header (direct connection) or Origin matches Host.
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			return true
-		}
-		// Parse origin and compare scheme+host with request Host
-		if u, err := url.Parse(origin); err == nil {
-			return u.Host == r.Host
-		}
-		return false
+		// Delegates to isOriginAllowed which preserves the original
+		// "empty Origin → allow" and "Origin host == r.Host → allow"
+		// behavior, plus the cfg.TrustedOrigins allowlist for deployments
+		// behind a reverse proxy that rewrites Host (CloudFront default
+		// origin request policy, ALB without Host preservation, etc.).
+		// config.Get() is a cached singleton so this is cheap.
+		return isOriginAllowed(r, r.Header.Get("Origin"), config.Get())
 	},
 	ReadBufferSize:  8192,
 	WriteBufferSize: 32768,
@@ -1113,6 +1182,10 @@ type Server struct {
 	instances          map[string]*ScanInstance // concurrent scan instances
 	instancesMu        sync.RWMutex
 	postScanChatFn     func(*config.Config, []llm.Message) (string, error)
+	// targetPolicy is the layered allow/block decision surface for scan
+	// intake — see internal/web/target_policy.go. Built once from cfg at
+	// NewServer; safe for concurrent reads.
+	targetPolicy *targetPolicy
 }
 
 // NewServer creates a new web server.
@@ -1136,6 +1209,7 @@ func NewServer(cfg *config.Config, port int) *Server {
 		discordMinSeverity: strings.ToLower(strings.TrimSpace(cfg.DiscordMinSeverity)),
 		rateLimiter:        rl,
 		instances:          make(map[string]*ScanInstance),
+		targetPolicy:       newTargetPolicyFromConfig(cfg),
 		postScanChatFn: func(cfg *config.Config, messages []llm.Message) (string, error) {
 			client := llm.NewClient(cfg)
 			client.SetContext(context.Background())
@@ -2678,11 +2752,18 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		}
 	}
 
-	// Filter out local/internal targets to prevent self-scanning
+	// Filter targets through the layered scan-scope policy. Loopback and
+	// link-local stay hard-blocked regardless of config; RFC 1918 / ULA
+	// targets pass when XALGORIX_ALLOW_PRIVATE_NETWORKS=true. See
+	// internal/web/target_policy.go.
+	policy := s.targetPolicy
+	if policy == nil {
+		policy = newTargetPolicyFromConfig(s.cfg)
+	}
 	var safeTargets []string
 	for _, t := range cleanTargets {
-		if isBlockedTarget(t) {
-			log.Printf("[BLOCKLIST] Skipping blocked target: %s (local/internal IP)", t)
+		if allowed, reason := policy.Decide(t); !allowed {
+			log.Printf("[BLOCKLIST] Skipping target %q (reason=%s)", t, reason)
 		} else {
 			safeTargets = append(safeTargets, t)
 		}
@@ -3014,7 +3095,7 @@ func (s *Server) runSingleTarget(_ context.Context, scanCfg *config.Config, req 
 		scanDir:         scanDir,
 		cfg:             scanCfg,
 		server:          s,
-		instruction:     buildAutonomousInstruction(target, instruction),
+		instruction:     buildAutonomousInstruction(target, instruction, scanCfg.TargetAllowPrivateNetworks),
 		name:            req.Name,
 		userInstruction: req.Instruction,
 		severityFilter:  req.SeverityFilter,
@@ -3043,7 +3124,7 @@ func (s *Server) runSingleTarget(_ context.Context, scanCfg *config.Config, req 
 func (s *Server) runDASTTarget(_ context.Context, scanCfg *config.Config, req ScanRequest, target string, idx, total int) {
 	scanDir := s.makeScanDir(target)
 
-	dastInstruction := buildDASTInstruction(target)
+	dastInstruction := buildDASTInstruction(target, scanCfg.TargetAllowPrivateNetworks)
 	if req.Instruction != "" {
 		dastInstruction += "\n\n" + req.Instruction
 	}
@@ -5451,66 +5532,9 @@ func (s *Server) sendSimpleEmbed(color int, title, description string) {
 	}()
 }
 
-// isBlockedTarget checks whether a target resolves to a local, loopback, or internal
-// IP address. This prevents the agent from inadvertently scanning the host machine.
-func isBlockedTarget(target string) bool {
-	// Strip scheme if present (http://127.0.0.1 → 127.0.0.1)
-	host := target
-	if u, err := url.Parse(target); err == nil && u.Host != "" {
-		host = u.Hostname()
-	}
-	// Also handle host:port without scheme
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-
-	// Explicit textual matches (fast path)
-	lower := strings.ToLower(host)
-	if lower == "localhost" || lower == "0.0.0.0" || lower == "[::1]" || lower == "::1" {
-		return true
-	}
-
-	// Parse as IP
-	ip := net.ParseIP(host)
-	if ip == nil {
-		// Try DNS resolution for hostnames that might resolve to local IPs
-		addrs, err := net.LookupHost(host)
-		if err != nil || len(addrs) == 0 {
-			return false // can't resolve — let it through, will fail naturally
-		}
-		ip = net.ParseIP(addrs[0])
-		if ip == nil {
-			return false
-		}
-	}
-
-	// Check blocked ranges
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-		return true
-	}
-
-	// RFC 1918 private ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-	privateCIDRs := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"127.0.0.0/8",
-		"169.254.0.0/16", // link-local
-		"::1/128",
-		"fc00::/7",  // IPv6 unique local
-		"fe80::/10", // IPv6 link-local
-	}
-	for _, cidr := range privateCIDRs {
-		_, subnet, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
-		if subnet.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
+// isBlockedTarget was replaced by the layered targetPolicy in
+// internal/web/target_policy.go. The intake call site uses
+// (*Server).targetPolicy.Decide(target).
 
 // severityMeetsThreshold returns true if the vuln severity is at or above the minimum
 // threshold. Empty threshold means "send everything".

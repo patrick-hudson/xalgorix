@@ -60,6 +60,17 @@ func (c *Client) GetTokens() (promptTokens, completionTokens, totalTokens int) {
 	return c.totalIn, c.totalOut, c.totalIn + c.totalOut
 }
 
+// maxTokens returns the configured per-turn assistant token cap, falling
+// back to a conservative 8192 default when XALGORIX_LLM_MAX_TOKENS is unset
+// or zero. Used by the OpenAI-compat and Anthropic request builders so the
+// upstream gateway never falls back to its own (often tiny) default.
+func (c *Client) maxTokens() int {
+	if c.cfg != nil && c.cfg.LLMMaxTokens > 0 {
+		return c.cfg.LLMMaxTokens
+	}
+	return 8192
+}
+
 // NewClient creates a new LLM client.
 func NewClient(cfg *config.Config) *Client {
 	apiModel := cfg.ResolveModel()
@@ -302,12 +313,34 @@ func apiErrorHasStatus(errStr string, status int) bool {
 
 func isContextWindowError(errStr string) bool {
 	errStr = strings.ToLower(errStr)
-	return strings.Contains(errStr, "400") &&
-		(strings.Contains(errStr, "context window") ||
-			strings.Contains(errStr, "maximum context length") ||
-			strings.Contains(errStr, "too many tokens") ||
-			strings.Contains(errStr, "token limit") ||
-			strings.Contains(errStr, "invalid params"))
+	// Body-wording match. Historically required HTTP 400 too, but Bedrock-via-
+	// gateway sometimes remaps the status to 422/500 while keeping a clear
+	// "input is too long" body — relying on the body alone catches more
+	// providers without false positives. Each fragment below maps to a known
+	// upstream error message:
+	//   - context window / maximum context length: OpenAI, Azure OpenAI
+	//   - too many tokens / token limit:           OpenAI, MiniMax
+	//   - invalid params:                          DeepSeek
+	//   - input is too long / prompt is too long:  AWS Bedrock (Anthropic / Nova)
+	//   - validationexception:                     AWS Bedrock generic
+	//   - tokens exceed:                           Anthropic native, some clones
+	fragments := []string{
+		"context window",
+		"maximum context length",
+		"too many tokens",
+		"token limit",
+		"invalid params",
+		"input is too long",
+		"prompt is too long",
+		"validationexception",
+		"tokens exceed",
+	}
+	for _, f := range fragments {
+		if strings.Contains(errStr, f) {
+			return true
+		}
+	}
+	return false
 }
 
 func isRateLimitError(errStr string) bool {
@@ -466,6 +499,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 				Messages:      messages,
 				Stream:        true,
 				StreamOptions: &streamOptions{IncludeUsage: true},
+				MaxTokens:     c.maxTokens(),
 			}
 			body, _ = json.Marshal(reqBody)
 		}
@@ -663,7 +697,18 @@ func (c *Client) doChat(messages []Message) (string, error) {
 			return "", fmt.Errorf("failed to marshal Anthropic request: %w", err)
 		}
 	} else {
-		reqBody := chatRequest{Model: model, Messages: messages, Stream: false}
+		// Mirror the Anthropic native path: explicitly set max_tokens so we
+		// don't depend on the upstream gateway's default. Bedrock's OpenAI-
+		// compat shim defaults to a value low enough that Claude extended
+		// thinking can consume the entire budget on long prompts and return
+		// content="" — surfaced to the agent as the "(x/12) empty response"
+		// warning. cfg.LLMMaxTokens is overridable via XALGORIX_LLM_MAX_TOKENS.
+		reqBody := chatRequest{
+			Model:     model,
+			Messages:  messages,
+			Stream:    false,
+			MaxTokens: c.maxTokens(),
+		}
 		body, err = json.Marshal(reqBody)
 		if err != nil {
 			return "", fmt.Errorf("failed to marshal request: %w", err)

@@ -3,8 +3,46 @@ package web
 
 import "fmt"
 
-// Build autonomous instruction that gives AI freedom to decide approach
-func buildAutonomousInstruction(target string, customInstruction string) string {
+// scopeForbiddenSection returns the "what is OUT of scope" prose injected
+// into the autonomous-mode instruction. The text varies based on whether
+// XALGORIX_ALLOW_PRIVATE_NETWORKS is on — when on, RFC 1918 / ULA targets
+// are explicitly in scope but loopback / link-local / cloud-metadata
+// surfaces remain off-limits. When off, the original blanket "NEVER scan
+// any private IP" prose is preserved for upstream / non-sandbox
+// deployments.
+func scopeForbiddenSection(allowPrivate bool) string {
+	if allowPrivate {
+		return `**⛔ STRICTLY FORBIDDEN — NEVER scan these (they are the host machine or its IAM credential surface, NOT the target):**
+- 127.0.0.1, localhost, 0.0.0.0, ::1 (loopback addresses on the agent's own host)
+- 169.254.0.0/16 (link-local — covers EC2 IMDS 169.254.169.254 and ECS task metadata 169.254.170.2)
+- host.docker.internal, gateway.docker.internal, metadata.google.internal, metadata.azure.com (container / cloud metadata shorthands)
+
+**✅ IN SCOPE on this deployment:** Internal RFC 1918 ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and IPv6 ULA (fc00::/7) ARE in scope when reachable from the agent. Internal services on those ranges are part of the target's infrastructure on this engagement.
+
+If a tool surfaces a 127.x or 169.254.x address, SKIP IT and move on — those expose the agent's own credentials, not the target.`
+	}
+	return `**⛔ STRICTLY FORBIDDEN — NEVER scan these (they are the local server, NOT the target):**
+- 127.0.0.1, localhost, 0.0.0.0, ::1 (loopback addresses)
+- 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 (private/internal IPs)
+- 169.254.0.0/16 (link-local addresses)
+- Any IP that resolves to the machine you are running on
+If a tool discovers a local/internal IP, SKIP IT and move to the next target. Do NOT run any scans, port scans, or vulnerability tests against local addresses.`
+}
+
+// scopeForbiddenLine returns the one-line out-of-scope notice used in the
+// DAST instruction. Same selection logic as scopeForbiddenSection, just
+// compressed to a single line for the DAST template.
+func scopeForbiddenLine(allowPrivate bool) string {
+	if allowPrivate {
+		return `**⛔ NEVER scan:** 127.0.0.1, localhost, 169.254.x.x, host.docker.internal, metadata.* — these are the agent's own host or IAM surface. **✅ IN SCOPE:** internal 10.x / 172.16-31.x / 192.168.x ranges ARE in scope on this deployment.`
+	}
+	return `**⛔ NEVER scan:** 127.0.0.1, localhost, 0.0.0.0, ::1, 10.x.x.x, 172.16-31.x.x, 192.168.x.x, 169.254.x.x — these are local/internal and NOT the target.`
+}
+
+// Build autonomous instruction that gives AI freedom to decide approach.
+// allowPrivate controls whether RFC 1918 / ULA targets are in scope (see
+// XALGORIX_ALLOW_PRIVATE_NETWORKS / target_policy.go).
+func buildAutonomousInstruction(target string, customInstruction string, allowPrivate bool) string {
 	baseInstruction := `## AUTONOMOUS PENTESTING MODE — EXPLOIT-FIRST METHODOLOGY
 
 You are an elite penetration tester. YOUR GOAL: Find REAL, EXPLOITABLE vulnerabilities with PROOF.
@@ -19,12 +57,7 @@ Your primary target is ` + "`" + `` + target + `` + "`" + `. However, the follow
 
 **Out of scope:** Completely different domains, third-party services (Google, AWS, CDNs), unless they are explicitly part of the target's infrastructure.
 
-**⛔ STRICTLY FORBIDDEN — NEVER scan these (they are the local server, NOT the target):**
-- 127.0.0.1, localhost, 0.0.0.0, ::1 (loopback addresses)
-- 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 (private/internal IPs)
-- 169.254.0.0/16 (link-local addresses)
-- Any IP that resolves to the machine you are running on
-If a tool discovers a local/internal IP, SKIP IT and move to the next target. Do NOT run any scans, port scans, or vulnerability tests against local addresses.
+` + scopeForbiddenSection(allowPrivate) + `
 
 **Why:** Many applications split auth (login.example.com), API (api.example.com), and web (www.example.com) across subdomains. Testing only www would miss critical attack surface.
 
@@ -240,15 +273,16 @@ If you notice a possible vulnerability during recon, record it as an observation
 	return instruction
 }
 
-// Build autonomous DAST instruction for URL scanning
-func buildDASTInstruction(target string) string {
+// Build autonomous DAST instruction for URL scanning. allowPrivate has the
+// same meaning as in buildAutonomousInstruction.
+func buildDASTInstruction(target string, allowPrivate bool) string {
 	return `## AUTONOMOUS DAST MODE — EXPLOIT-FIRST
 
 YOUR TARGET: ` + target + `
 
 **SCOPE:** Primary target + all sibling subdomains of the same root domain (e.g., www.example.com → login.example.com, api.example.com are in scope). Follow redirects to auth/SSO subdomains.
 
-**⛔ NEVER scan:** 127.0.0.1, localhost, 0.0.0.0, ::1, 10.x.x.x, 172.16-31.x.x, 192.168.x.x, 169.254.x.x — these are local/internal and NOT the target.
+` + scopeForbiddenLine(allowPrivate) + `
 
 ## ORGANIZE YOUR WORK
 You are already inside the target's scan workspace. Save evidence and tool output in the current directory with clear filenames. Do not use cd to leave this workspace and do not write to /root, /tmp, or another home directory.
