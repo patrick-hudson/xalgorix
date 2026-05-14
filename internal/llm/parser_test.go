@@ -85,35 +85,49 @@ func TestParseAllFormats(t *testing.T) {
 
 // TestFixIncomplete_SingleUnclosed exercises the original (pre-fix) case:
 // one open <function=...> tag with no </function>. The repaired string
-// must parse cleanly.
+// must parse cleanly, the second return must be true (signals repair),
+// and the resulting ToolCall must be flagged Truncated so the agent knows
+// to nudge instead of dispatch.
 func TestFixIncomplete_SingleUnclosed(t *testing.T) {
 	in := "<function=terminal_execute>\n<parameter=command>id</parameter>"
-	fixed := fixIncomplete(in)
+	fixed, repaired := fixIncomplete(in)
 	if !strings.Contains(fixed, "</function>") {
 		t.Fatalf("fixIncomplete did not append closing tag: %q", fixed)
 	}
-	calls := ParseToolCalls(fixed)
+	if !repaired {
+		t.Error("fixIncomplete did not report a repair on an unclosed tag")
+	}
+	calls := ParseToolCalls(in) // parse the raw input — ParseToolCalls calls fixIncomplete itself
 	if len(calls) != 1 || calls[0].Name != "terminal_execute" {
 		t.Fatalf("expected 1 terminal_execute call, got %+v", calls)
 	}
 	if calls[0].Args["command"] != "id" {
 		t.Errorf("command = %q, want id", calls[0].Args["command"])
 	}
+	if !calls[0].Truncated {
+		t.Error("expected Truncated=true on the repaired call")
+	}
 }
 
 // TestFixIncomplete_MultiBlockTrailingUnclosed is the regression case the
 // review flagged: two open tags but only one close — the trailing one is
-// the truncated one. The fix should still produce a parseable string.
+// the truncated one. The fix should still produce a parseable string AND
+// only the trailing call should be flagged Truncated.
 func TestFixIncomplete_MultiBlockTrailingUnclosed(t *testing.T) {
 	in := "<function=list_files>\n<parameter=path>/etc</parameter>\n</function>\n" +
 		"<function=terminal_execute>\n<parameter=command>id</parameter>"
-	fixed := fixIncomplete(in)
-	calls := ParseToolCalls(fixed)
+	calls := ParseToolCalls(in)
 	if len(calls) != 2 {
-		t.Fatalf("expected 2 tool calls after repair, got %d (fixed=%q)", len(calls), fixed)
+		t.Fatalf("expected 2 tool calls after repair, got %d", len(calls))
 	}
 	if calls[0].Name != "list_files" || calls[1].Name != "terminal_execute" {
 		t.Errorf("call order wrong: %v", calls)
+	}
+	if calls[0].Truncated {
+		t.Error("first call should NOT be flagged truncated (it was well-formed)")
+	}
+	if !calls[1].Truncated {
+		t.Error("last call SHOULD be flagged truncated (it was the unclosed one)")
 	}
 }
 
@@ -121,8 +135,12 @@ func TestFixIncomplete_MultiBlockTrailingUnclosed(t *testing.T) {
 // matching close — otherwise we'd double-close and break the parser.
 func TestFixIncomplete_AlreadyBalanced(t *testing.T) {
 	in := "<function=list_files>\n<parameter=path>/etc</parameter>\n</function>"
-	if got := fixIncomplete(in); got != in {
+	got, repaired := fixIncomplete(in)
+	if got != in {
 		t.Errorf("expected no-op for balanced input, got %q", got)
+	}
+	if repaired {
+		t.Error("repaired flag should be false for balanced input")
 	}
 }
 
@@ -130,8 +148,12 @@ func TestFixIncomplete_AlreadyBalanced(t *testing.T) {
 // mangled into a fake tool call.
 func TestFixIncomplete_NoOpenTag(t *testing.T) {
 	in := "I will now run a command."
-	if got := fixIncomplete(in); got != in {
+	got, repaired := fixIncomplete(in)
+	if got != in {
 		t.Errorf("expected no-op for non-tool prose, got %q", got)
+	}
+	if repaired {
+		t.Error("repaired flag should be false for non-tool prose")
 	}
 }
 
@@ -140,12 +162,18 @@ func TestFixIncomplete_NoOpenTag(t *testing.T) {
 // "</function>".
 func TestFixIncomplete_PartialEndTag(t *testing.T) {
 	in := "<function=finish>\n<parameter=summary>done</parameter>\n</"
-	fixed := fixIncomplete(in)
+	fixed, repaired := fixIncomplete(in)
 	if !strings.HasSuffix(fixed, "</function>") {
 		t.Errorf("expected fixed string to end with </function>, got %q", fixed)
 	}
-	calls := ParseToolCalls(fixed)
+	if !repaired {
+		t.Error("expected repaired=true for a partial end tag")
+	}
+	calls := ParseToolCalls(in)
 	if len(calls) != 1 || calls[0].Name != "finish" {
 		t.Fatalf("expected 1 finish call, got %+v", calls)
+	}
+	if !calls[0].Truncated {
+		t.Error("expected Truncated=true on the repaired call")
 	}
 }

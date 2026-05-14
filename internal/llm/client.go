@@ -131,8 +131,34 @@ type streamOptions struct {
 
 // chatChoice represents a response choice.
 type chatChoice struct {
-	Delta   struct{ Content string } `json:"delta"`
-	Message struct{ Content string } `json:"message"`
+	Delta        struct{ Content string } `json:"delta"`
+	Message      struct{ Content string } `json:"message"`
+	FinishReason string                   `json:"finish_reason,omitempty"`
+}
+
+// ChatMeta carries the per-response metadata the agent needs to
+// distinguish a truncated completion ("the model ran out of tokens
+// mid-tool-call") from a clean stop. StopReason normalizes the two
+// provider conventions:
+//   - OpenAI / OpenAI-compatible (incl. bedrock-access-gateway): "length"
+//     when truncated by max_tokens; "stop" / "" otherwise.
+//   - Anthropic native: "max_tokens" when truncated; "end_turn" otherwise.
+//   - Gemini: "MAX_TOKENS" when truncated; passed through verbatim.
+//
+// Callers should treat StopReason ∈ {"length", "max_tokens", "MAX_TOKENS"}
+// as "truncated".
+type ChatMeta struct {
+	StopReason   string
+	OutputTokens int
+}
+
+// IsTruncated reports whether the LLM was cut off by the max_tokens limit.
+func (m ChatMeta) IsTruncated() bool {
+	switch m.StopReason {
+	case "length", "max_tokens", "MAX_TOKENS":
+		return true
+	}
+	return false
 }
 
 // chatResponse is the OpenAI-compatible response.
@@ -161,6 +187,7 @@ type geminiCandidate struct {
 	Content struct {
 		Parts []geminiPart `json:"parts"`
 	} `json:"content"`
+	FinishReason string `json:"finishReason,omitempty"`
 }
 
 type geminiResponse struct {
@@ -371,11 +398,22 @@ func isNonRetryableLLMError(errStr string) bool {
 }
 
 // Chat sends a non-streaming chat request and returns the full response.
+// Most callers want this — it discards the per-response metadata. Use
+// ChatWithMeta when you need to differentiate a truncated completion from
+// a clean stop (see the agent loop, which uses this to detect tool calls
+// that the model was cut off mid-emission).
 func (c *Client) Chat(messages []Message) (string, error) {
-	return c.chatWithRetry(messages)
+	content, _, err := c.ChatWithMeta(messages)
+	return content, err
 }
 
-func (c *Client) chatWithRetry(messages []Message) (string, error) {
+// ChatWithMeta is Chat plus the per-response metadata the agent needs
+// (StopReason etc.). Same retry / non-retryable semantics as Chat.
+func (c *Client) ChatWithMeta(messages []Message) (string, ChatMeta, error) {
+	return c.chatWithRetryMeta(messages)
+}
+
+func (c *Client) chatWithRetryMeta(messages []Message) (string, ChatMeta, error) {
 	maxRetries := c.cfg.LLMMaxRetries
 	if maxRetries < 3 {
 		maxRetries = 3
@@ -405,12 +443,12 @@ func (c *Client) chatWithRetry(messages []Message) (string, error) {
 
 		// Check if context is cancelled before retrying
 		if ctx := c.loadCtx(); ctx.Err() != nil {
-			return "", fmt.Errorf("LLM request cancelled: %w", ctx.Err())
+			return "", ChatMeta{}, fmt.Errorf("LLM request cancelled: %w", ctx.Err())
 		}
 
-		result, err := c.doChat(messages)
+		result, meta, err := c.doChatWithMeta(messages)
 		if err == nil {
-			return result, nil
+			return result, meta, nil
 		}
 		lastErr = err
 
@@ -420,12 +458,12 @@ func (c *Client) chatWithRetry(messages []Message) (string, error) {
 		errStr := err.Error()
 		if isContextWindowError(errStr) {
 			log.Printf("[llm] Non-retryable error (context overflow), returning immediately: %v", err)
-			return "", fmt.Errorf("context window overflow: %w", err)
+			return "", ChatMeta{}, fmt.Errorf("context window overflow: %w", err)
 		}
 
 		if isNonRetryableLLMError(errStr) {
 			log.Printf("[llm] Non-retryable LLM error, returning immediately: %v", err)
-			return "", fmt.Errorf("LLM request failed: %w", err)
+			return "", ChatMeta{}, fmt.Errorf("LLM request failed: %w", err)
 		}
 
 		// Track if last error was a rate limit for the post-loop wrapper
@@ -437,9 +475,9 @@ func (c *Client) chatWithRetry(messages []Message) (string, error) {
 
 	// Preserve rate-limit marker if the final error was rate-limited
 	if lastErr != nil && strings.Contains(lastErr.Error(), "rate limited:") {
-		return "", fmt.Errorf("rate limited: LLM request failed after %d retries: %w", maxRetries, lastErr)
+		return "", ChatMeta{}, fmt.Errorf("rate limited: LLM request failed after %d retries: %w", maxRetries, lastErr)
 	}
-	return "", fmt.Errorf("LLM request failed after %d retries: %w", maxRetries, lastErr)
+	return "", ChatMeta{}, fmt.Errorf("LLM request failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // ChatStream sends a streaming chat request and returns a channel of chunks.
@@ -639,8 +677,19 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 	return ch
 }
 
-// doChat performs a single non-streaming API call.
+// doChat performs a single non-streaming API call. Thin wrapper around
+// doChatWithMeta that discards the response metadata. Kept on the type
+// for backwards compatibility with internal tests that exercise the
+// single-shot path.
 func (c *Client) doChat(messages []Message) (string, error) {
+	content, _, err := c.doChatWithMeta(messages)
+	return content, err
+}
+
+// doChatWithMeta performs a single non-streaming API call and returns the
+// response together with the metadata (StopReason etc.) the caller needs
+// to detect truncation.
+func (c *Client) doChatWithMeta(messages []Message) (string, ChatMeta, error) {
 	endpoint, model := c.resolveEndpoint()
 	log.Printf("[llm] Request → URL=%s model=%s apiModel=%s cfgLLM=%s cfgAPIBase=%s", endpoint, model, c.apiModel, c.cfg.LLM, c.cfg.APIBase)
 
@@ -670,7 +719,7 @@ func (c *Client) doChat(messages []Message) (string, error) {
 		}
 		body, err = json.Marshal(gemReq)
 		if err != nil {
-			return "", fmt.Errorf("failed to marshal Gemini request: %w", err)
+			return "", ChatMeta{}, fmt.Errorf("failed to marshal Gemini request: %w", err)
 		}
 	} else if isAnthropic {
 		// Anthropic: system as top-level field, max_tokens required
@@ -694,7 +743,7 @@ func (c *Client) doChat(messages []Message) (string, error) {
 		}
 		body, err = json.Marshal(anReq)
 		if err != nil {
-			return "", fmt.Errorf("failed to marshal Anthropic request: %w", err)
+			return "", ChatMeta{}, fmt.Errorf("failed to marshal Anthropic request: %w", err)
 		}
 	} else {
 		// Mirror the Anthropic native path: explicitly set max_tokens so we
@@ -711,14 +760,14 @@ func (c *Client) doChat(messages []Message) (string, error) {
 		}
 		body, err = json.Marshal(reqBody)
 		if err != nil {
-			return "", fmt.Errorf("failed to marshal request: %w", err)
+			return "", ChatMeta{}, fmt.Errorf("failed to marshal request: %w", err)
 		}
 	}
 
 	reqCtx := c.loadCtx()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", ChatMeta{}, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -735,54 +784,59 @@ func (c *Client) doChat(messages []Message) (string, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
+		return "", ChatMeta{}, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read response body: %w", err)
+		return "", ChatMeta{}, fmt.Errorf("failed to read response body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
+		return "", ChatMeta{}, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	if isGoogle {
 		var gemResp geminiResponse
 		if err := json.Unmarshal(respBody, &gemResp); err != nil {
-			return "", fmt.Errorf("failed to parse Gemini response: %w", err)
+			return "", ChatMeta{}, fmt.Errorf("failed to parse Gemini response: %w", err)
 		}
 		if len(gemResp.Candidates) == 0 || len(gemResp.Candidates[0].Content.Parts) == 0 {
-			return "", fmt.Errorf("no content in Gemini response")
+			return "", ChatMeta{}, fmt.Errorf("no content in Gemini response")
 		}
-		return gemResp.Candidates[0].Content.Parts[0].Text, nil
+		meta := ChatMeta{StopReason: gemResp.Candidates[0].FinishReason}
+		return gemResp.Candidates[0].Content.Parts[0].Text, meta, nil
 	}
 
 	if isAnthropic {
 		var anResp anthropicResponse
 		if err := json.Unmarshal(respBody, &anResp); err != nil {
-			return "", fmt.Errorf("failed to parse Anthropic response: %w", err)
+			return "", ChatMeta{}, fmt.Errorf("failed to parse Anthropic response: %w", err)
 		}
 		// Track token usage
 		c.mu.Lock()
 		c.totalIn += anResp.Message.Usage.InputTokens
 		c.totalOut += anResp.Message.Usage.OutputTokens
 		c.mu.Unlock()
+		meta := ChatMeta{
+			StopReason:   anResp.Message.StopReason,
+			OutputTokens: anResp.Message.Usage.OutputTokens,
+		}
 		// Extract text from content blocks
 		for _, block := range anResp.Message.Content {
 			if block.Type == "text" && block.Text != "" {
-				return block.Text, nil
+				return block.Text, meta, nil
 			}
 		}
-		return "", fmt.Errorf("no text content in Anthropic response")
+		return "", meta, fmt.Errorf("no text content in Anthropic response")
 	}
 
 	var chatResp chatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
+		return "", ChatMeta{}, fmt.Errorf("failed to parse response: %w", err)
 	}
 	if len(chatResp.Choices) == 0 {
-		return "", fmt.Errorf("no choices in response")
+		return "", ChatMeta{}, fmt.Errorf("no choices in response")
 	}
 	if chatResp.Usage != nil {
 		c.mu.Lock()
@@ -790,5 +844,9 @@ func (c *Client) doChat(messages []Message) (string, error) {
 		c.totalOut += chatResp.Usage.CompletionTokens
 		c.mu.Unlock()
 	}
-	return chatResp.Choices[0].Message.Content, nil
+	meta := ChatMeta{StopReason: chatResp.Choices[0].FinishReason}
+	if chatResp.Usage != nil {
+		meta.OutputTokens = chatResp.Usage.CompletionTokens
+	}
+	return chatResp.Choices[0].Message.Content, meta, nil
 }

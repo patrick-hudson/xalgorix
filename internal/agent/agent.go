@@ -495,7 +495,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 			a.emit(Event{Type: "message", Content: iterResult.EmitMessage, TotalTokens: tokenCount()})
 		}
 
-		response, err := a.client.Chat(a.messages)
+		response, meta, err := a.client.ChatWithMeta(a.messages)
 		// Update activity after LLM response
 		a.touchActivity()
 
@@ -595,6 +595,43 @@ func (a *Agent) Run(targets []string, instruction string) {
 		a.msgMu.Unlock()
 
 		toolCalls := llm.ParseToolCalls(responseClean)
+
+		// Suppress tool calls the LLM was cut off mid-emission. The parser's
+		// fixIncomplete auto-closes a trailing unclosed `<function=…>`, which
+		// the registry would otherwise reject as "missing required parameter"
+		// — burning a circuit-breaker tick on what is really an output-budget
+		// problem. We treat (parser.Truncated || meta.IsTruncated()) AND empty
+		// args as truncation and ask the model to re-emit.
+		if len(toolCalls) > 0 {
+			filtered := make([]llm.ToolCall, 0, len(toolCalls))
+			truncatedFiltered := false
+			for _, tc := range toolCalls {
+				if (tc.Truncated || meta.IsTruncated()) && len(tc.Args) == 0 {
+					truncatedFiltered = true
+					a.emit(Event{
+						Type: "message",
+						Content: fmt.Sprintf(
+							"⚠️ <function=%s> call was cut off at the LLM max_tokens limit (%d). Asking the model to re-emit.",
+							tc.Name, a.cfg.LLMMaxTokens,
+						),
+						TotalTokens: tokenCount(),
+					})
+					continue
+				}
+				filtered = append(filtered, tc)
+			}
+			toolCalls = filtered
+			if truncatedFiltered && len(toolCalls) == 0 {
+				nudge := fmt.Sprintf(
+					"Your previous response was cut off at the LLM max_tokens limit (%d) before the <function=…> call had any parameters. Re-emit the FULL tool call (opening function tag, all required <parameter=…> tags, closing </function>) concisely. If this keeps happening, the operator should bump XALGORIX_LLM_MAX_TOKENS.",
+					a.cfg.LLMMaxTokens,
+				)
+				a.msgMu.Lock()
+				a.messages = append(a.messages, llm.Message{Role: "user", Content: nudge})
+				a.msgMu.Unlock()
+				continue
+			}
+		}
 
 		// ── Hook: OnNoToolResponse ──
 		if len(toolCalls) == 0 {

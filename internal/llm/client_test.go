@@ -315,6 +315,70 @@ func TestDoChat_AnthropicAPIBaseWithoutProviderUsesAnthropicProtocol(t *testing.
 	}
 }
 
+// TestChatWithMeta_OpenAILengthFinishReason confirms the OpenAI-compatible
+// finish_reason field is plumbed through to ChatMeta and that IsTruncated
+// reports true for "length". This is the signal the agent uses to detect
+// a tool call that was cut off mid-emission at the max_tokens limit.
+func TestChatWithMeta_OpenAILengthFinishReason(t *testing.T) {
+	c := NewClient(&config.Config{
+		LLM:           "openai/gpt-test",
+		APIBase:       "https://api.openai.com/v1",
+		APIKey:        "sk-test",
+		LLMMaxRetries: 1,
+	})
+	c.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusOK, `{"choices":[{"message":{"content":"<function=terminal_execute>"},"finish_reason":"length"}],"usage":{"prompt_tokens":50,"completion_tokens":8192}}`), nil
+	})}
+
+	got, meta, err := c.ChatWithMeta([]Message{{Role: "user", Content: "hello"}})
+	if err != nil {
+		t.Fatalf("ChatWithMeta returned error: %v", err)
+	}
+	if got == "" {
+		t.Error("ChatWithMeta returned empty content")
+	}
+	if meta.StopReason != "length" {
+		t.Errorf("meta.StopReason = %q, want length", meta.StopReason)
+	}
+	if !meta.IsTruncated() {
+		t.Error("meta.IsTruncated() = false, want true for finish_reason=length")
+	}
+	if meta.OutputTokens != 8192 {
+		t.Errorf("meta.OutputTokens = %d, want 8192", meta.OutputTokens)
+	}
+}
+
+// TestChatWithMeta_AnthropicMaxTokensStopReason mirrors the above for the
+// native Anthropic protocol (stop_reason="max_tokens").
+func TestChatWithMeta_AnthropicMaxTokensStopReason(t *testing.T) {
+	c := NewClient(&config.Config{
+		LLM:           "claude-sonnet-4-20250514",
+		APIBase:       "https://api.anthropic.com",
+		APIKey:        "anthropic-key",
+		LLMMaxRetries: 1,
+	})
+	c.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusOK, `{"message":{"content":[{"type":"text","text":"<function=terminal_execute>"}],"stop_reason":"max_tokens","usage":{"input_tokens":40,"output_tokens":16384}}}`), nil
+	})}
+
+	got, meta, err := c.ChatWithMeta([]Message{{Role: "user", Content: "hello"}})
+	if err != nil {
+		t.Fatalf("ChatWithMeta returned error: %v", err)
+	}
+	if got == "" {
+		t.Error("ChatWithMeta returned empty content")
+	}
+	if meta.StopReason != "max_tokens" {
+		t.Errorf("meta.StopReason = %q, want max_tokens", meta.StopReason)
+	}
+	if !meta.IsTruncated() {
+		t.Error("meta.IsTruncated() = false, want true for stop_reason=max_tokens")
+	}
+	if meta.OutputTokens != 16384 {
+		t.Errorf("meta.OutputTokens = %d, want 16384", meta.OutputTokens)
+	}
+}
+
 func TestChatWithRetry_Gemini401IsNotRateLimited(t *testing.T) {
 	c := NewClient(&config.Config{
 		LLM:           "gemini-3.1-pro",

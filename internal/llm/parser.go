@@ -9,9 +9,18 @@ import (
 )
 
 // ToolCall represents a parsed tool invocation from LLM output.
+//
+// Truncated is set when the parser had to synthetically close the
+// `<function=…>` tag (i.e., the LLM was cut off mid-emission, almost
+// certainly at the max_tokens budget). Only the last call in a multi-call
+// response can be flagged truncated, because fixIncomplete only ever
+// repairs the trailing unclosed tag. The agent uses this together with
+// ChatMeta.StopReason to suppress the call instead of dispatching it
+// with empty args.
 type ToolCall struct {
-	Name string            `json:"name"`
-	Args map[string]string `json:"args"`
+	Name      string            `json:"name"`
+	Args      map[string]string `json:"args"`
+	Truncated bool              `json:"truncated,omitempty"`
 }
 
 var (
@@ -49,7 +58,7 @@ var (
 // ParseToolCalls extracts tool calls from LLM XML output.
 func ParseToolCalls(content string) []ToolCall {
 	content = normalizeFormat(content)
-	content = fixIncomplete(content)
+	content, repaired := fixIncomplete(content)
 
 	var calls []ToolCall
 
@@ -63,6 +72,14 @@ func ParseToolCalls(content string) []ToolCall {
 		args := extractParams(body)
 
 		calls = append(calls, ToolCall{Name: fnName, Args: args})
+	}
+
+	// If fixIncomplete had to synthesize a closing tag, only the LAST
+	// call could be the one that got cut off. The agent uses this to
+	// detect "LLM truncated mid-tool-call" and react with a re-emit
+	// nudge instead of forwarding the empty call to the registry.
+	if repaired && len(calls) > 0 {
+		calls[len(calls)-1].Truncated = true
 	}
 
 	return calls
@@ -172,12 +189,14 @@ func normalizeFormat(content string) string {
 // fixIncomplete adds a missing closing tag to the last unclosed tool-call
 // block in content. Earlier blocks are matched normally by the regex; only
 // the trailing one (the most common LLM truncation) is repaired here.
-func fixIncomplete(content string) string {
+// The second return is true when the content was repaired — callers
+// (ParseToolCalls) use that to mark the last ToolCall as Truncated.
+func fixIncomplete(content string) (string, bool) {
 	countOpen := strings.Count(content, "<function=") + strings.Count(content, "<invoke ")
 	countClose := strings.Count(content, "</function>") + strings.Count(content, "</invoke>")
 
 	if countOpen <= countClose {
-		return content
+		return content, false
 	}
 
 	// At least one open tag has no matching close. Append a single closing
@@ -185,9 +204,9 @@ func fixIncomplete(content string) string {
 	// will pick up the well-formed pairs first.
 	content = strings.TrimRight(content, " \t\n\r")
 	if strings.HasSuffix(content, "</") {
-		return content + "function>"
+		return content + "function>", true
 	}
-	return content + "\n</function>"
+	return content + "\n</function>", true
 }
 
 // FormatToolCall formats a tool call back into XML for display.
@@ -210,7 +229,7 @@ func FormatToolCall(name string, args map[string]string) string {
 // CleanContent removes tool call XML from content for display.
 func CleanContent(content string) string {
 	content = normalizeFormat(content)
-	content = fixIncomplete(content)
+	content, _ = fixIncomplete(content)
 
 	cleaned := toolPattern.ReplaceAllString(content, "")
 	cleaned = incompleteFunc.ReplaceAllString(cleaned, "")
